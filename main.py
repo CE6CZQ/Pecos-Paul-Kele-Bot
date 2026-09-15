@@ -10,7 +10,8 @@ Requiere:
 
 Variables de entorno:
     BOT_TOKEN              Token de @BotFather (obligatorio)
-    ADMIN_USER_ID          Telegram User ID autorizado (recomendado)
+    ADMIN_USER_IDS         Telegram User IDs autorizados separados por comas (recomendado)
+    ADMIN_USER_ID          Compatibilidad: un solo ID antiguo (opcional)
     BOT_TIMEZONE           Ej. America/Santiago (opcional)
     DATA_DIR               Carpeta de datos (opcional, por defecto ./data)
 """
@@ -54,7 +55,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.0.0-pella"
+VERSION = "1.1.0-multiadmin"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -65,10 +66,31 @@ BOT_TOKEN = (
     or ""
 ).strip()
 
-try:
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0").strip() or "0")
-except ValueError:
-    ADMIN_USER_ID = 0
+def _load_admin_user_ids() -> set[int]:
+    # Variable nueva: admite uno o varios IDs separados por coma, punto y coma o espacios.
+    raw = os.getenv("ADMIN_USER_IDS", "").strip()
+
+    # Compatibilidad con la versión anterior.
+    if not raw:
+        raw = os.getenv("ADMIN_USER_ID", "").strip()
+
+    result: set[int] = set()
+
+    for part in re.split(r"[;,\s]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value > 0:
+            result.add(value)
+
+    return result
+
+
+ADMIN_USER_IDS = _load_admin_user_ids()
 
 TIMEZONE_NAME = os.getenv("BOT_TIMEZONE", "America/Santiago").strip() or "America/Santiago"
 
@@ -431,7 +453,7 @@ db = Database(DB_PATH)
 
 
 def is_admin(user_id: int | None) -> bool:
-    return bool(user_id and ADMIN_USER_ID > 0 and user_id == ADMIN_USER_ID)
+    return bool(user_id and user_id in ADMIN_USER_IDS)
 
 
 def display_name(message: Message) -> str:
@@ -627,13 +649,15 @@ async def command_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("⚙️ La configuración solo está disponible por chat privado.")
         return
 
-    if ADMIN_USER_ID <= 0:
+    if not ADMIN_USER_IDS:
         await message.reply_text(
-            "La administración todavía no tiene un usuario autorizado.\n\n"
+            "La administración todavía no tiene usuarios autorizados.\n\n"
             f"Tu Telegram User ID es: {user.id}\n\n"
-            "En Pella agrega la variable de entorno:\n"
-            f"ADMIN_USER_ID={user.id}\n\n"
-            "Luego reinicia Pecos."
+            "En Railway agrega la variable de entorno:\n"
+            f"ADMIN_USER_IDS={user.id}\n\n"
+            "Para varios administradores usa comas, por ejemplo:\n"
+            "ADMIN_USER_IDS=123456789,987654321\n\n"
+            "Luego vuelve a desplegar Pecos."
         )
         return
 
@@ -758,13 +782,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if chat.type != ChatType.PRIVATE:
             await query.message.reply_text("⚙️ La configuración solo funciona por chat privado.")
             return
-        if ADMIN_USER_ID <= 0:
+        if not ADMIN_USER_IDS:
             await query.message.reply_text(
-                "Todavía no hay un administrador configurado.\n\n"
+                "Todavía no hay administradores configurados.\n\n"
                 f"Tu Telegram User ID es: {user_id}\n\n"
-                "En Pella agrega:\n"
-                f"ADMIN_USER_ID={user_id}\n\n"
-                "y reinicia Pecos."
+                "En Railway agrega:\n"
+                f"ADMIN_USER_IDS={user_id}\n\n"
+                "Para varios administradores usa comas, por ejemplo:\n"
+                "ADMIN_USER_IDS=123456789,987654321\n\n"
+                "y vuelve a desplegar Pecos."
             )
             return
         if not is_admin(user_id):
@@ -906,7 +932,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         status_text = (
             f"📊 Estado de {APP_NAME}\n\n"
             f"Versión: {VERSION}\n"
-            f"Administrador configurado: {'Sí' if ADMIN_USER_ID > 0 else 'No'}\n"
+            f"Administradores configurados: {len(ADMIN_USER_IDS)}\n"
             f"Palabras/frases restringidas: {len(db.list_terms())}\n"
             f"Grupos conocidos: {len(groups)}\n"
             f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
@@ -1311,32 +1337,34 @@ async def post_init(application: Application) -> None:
         scope=BotCommandScopeAllPrivateChats(),
     )
 
-    if ADMIN_USER_ID > 0:
+    if ADMIN_USER_IDS:
         admin_commands = [
             BotCommand("start", "Abrir el menú de Pecos"),
             BotCommand("id", "Ver mi Telegram User ID"),
             BotCommand("config", "Abrir configuración privada"),
             BotCommand("cancel", "Cancelar una operación"),
         ]
-        await application.bot.set_my_commands(
-            admin_commands,
-            scope=BotCommandScopeChat(ADMIN_USER_ID),
-        )
-        with contextlib.suppress(TelegramError):
-            await application.bot.set_chat_menu_button(
-                chat_id=ADMIN_USER_ID,
-                menu_button=MenuButtonCommands(),
+
+        for admin_user_id in sorted(ADMIN_USER_IDS):
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(admin_user_id),
             )
+            with contextlib.suppress(TelegramError):
+                await application.bot.set_chat_menu_button(
+                    chat_id=admin_user_id,
+                    menu_button=MenuButtonCommands(),
+                )
 
     application.bot_data["daily_task"] = asyncio.create_task(daily_loop(application))
 
     me = await application.bot.get_me()
     log.info(
-        "%s %s conectado como @%s | Admin ID: %s | Zona: %s | DB: %s",
+        "%s %s conectado como @%s | Admin IDs: %s | Zona: %s | DB: %s",
         APP_NAME,
         VERSION,
         me.username,
-        ADMIN_USER_ID if ADMIN_USER_ID > 0 else "NO CONFIGURADO",
+        ",".join(str(x) for x in sorted(ADMIN_USER_IDS)) if ADMIN_USER_IDS else "NO CONFIGURADOS",
         TIMEZONE_NAME,
         DB_PATH,
     )
