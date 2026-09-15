@@ -29,6 +29,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import time
 from urllib.parse import unquote, urlparse
 from datetime import datetime
 from pathlib import Path
@@ -58,7 +59,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.1.2-local-hash-fix"
+VERSION = "2.1.3-large-file-race-fix"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -1903,6 +1904,46 @@ def resolve_local_file_path(raw_path: str | None) -> Path | None:
     return None
 
 
+async def wait_for_complete_local_file(
+    path: Path,
+    expected_size: int,
+    timeout_seconds: int = 120,
+) -> int:
+    """
+    Espera a que el archivo local alcance el tamaño informado por Telegram.
+    Esto evita calcular el hash mientras un archivo grande todavía se está
+    materializando en disco.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_size = -1
+    stable_checks = 0
+
+    while time.monotonic() < deadline:
+        try:
+            current_size = path.stat().st_size
+        except OSError:
+            current_size = -1
+
+        if expected_size > 0:
+            if current_size == expected_size:
+                return current_size
+        else:
+            if current_size > 0 and current_size == last_size:
+                stable_checks += 1
+                if stable_checks >= 3:
+                    return current_size
+            else:
+                stable_checks = 0
+
+        last_size = current_size
+        await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"archivo local incompleto tras {timeout_seconds}s "
+        f"(esperado={expected_size}, actual={last_size})"
+    )
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
 
@@ -1968,7 +2009,7 @@ async def handle_duplicate(
         sender_name = display_name(message)
 
     try:
-        # Primera defensa: FileUniqueId. Es inmediata y no requiere leer el archivo.
+        # Detección rápida por identificador de Telegram.
         if unique_id:
             if db.unique_file_seen(chat_id, unique_id, message_id):
                 try:
@@ -1980,7 +2021,7 @@ async def handle_duplicate(
                         chat_id=chat_id,
                         text=(
                             "🤠 Easy, partner... ese archivo ya pasó por aquí. "
-                            "Pecos lo reconoció por su identificador de Telegram. 📂👀\\n\\n"
+                            "Pecos lo reconoció por su identificador de Telegram. 📂👀\n\n"
                             "El duplicado fue retirado."
                         ),
                     )
@@ -2001,135 +2042,153 @@ async def handle_duplicate(
             return False
 
         sha256 = None
+        original = None
 
-        # Modo fuerte: Telegram Bot API Server local.
-        # En --local, getFile entrega la ruta absoluta REAL del archivo.
-        # La usamos directamente en vez de depender de download_to_drive().
-        if LOCAL_BOT_API:
-            telegram_file = await context.bot.get_file(file_id)
+        # IMPORTANTE:
+        # Serializamos TODO el tramo crítico:
+        # obtener archivo -> esperar tamaño completo -> hash -> consultar DB -> registrar.
+        # En versiones anteriores solo estaba protegido el cálculo del hash; dos archivos
+        # grandes podían procesarse simultáneamente y ambos consultar la DB antes de que
+        # el primero quedara registrado.
+        async with HASH_SEMAPHORE:
+            started = time.monotonic()
 
-            local_path = resolve_local_file_path(
-                getattr(telegram_file, "file_path", None)
-            )
+            if LOCAL_BOT_API:
+                telegram_file = await context.bot.get_file(file_id)
 
-            # Fallback defensivo: PTB debería devolver la misma ruta local,
-            # pero lo intentamos si file_path no pudo resolverse directamente.
-            if local_path is None:
-                try:
-                    downloaded_path = await telegram_file.download_to_drive()
-                    local_path = resolve_local_file_path(str(downloaded_path))
-                except Exception as download_exc:
-                    log.warning(
-                        "HASH LOCAL: no se pudo resolver/copiar archivo=%s size=%s: %s",
-                        file_name,
-                        file_size,
-                        type(download_exc).__name__,
-                    )
-
-            if local_path is None or not local_path.is_file():
-                raise RuntimeError(
-                    f"HASH LOCAL: ruta inaccesible para {file_name} ({file_size} bytes)"
+                local_path = resolve_local_file_path(
+                    getattr(telegram_file, "file_path", None)
                 )
 
-            # Validación adicional: no es requisito para comparar, pero nos ayuda
-            # a detectar rutas incorrectas sin usar nombre+tamaño como criterio.
-            try:
-                actual_size = local_path.stat().st_size
-                if file_size and actual_size != file_size:
-                    log.warning(
-                        "HASH LOCAL: tamaño informado=%s tamaño local=%s archivo=%s",
-                        file_size,
-                        actual_size,
-                        file_name,
-                    )
-            except OSError:
-                pass
+                if local_path is None:
+                    try:
+                        downloaded_path = await telegram_file.download_to_drive()
+                        local_path = resolve_local_file_path(str(downloaded_path))
+                    except Exception as download_exc:
+                        log.warning(
+                            "HASH LOCAL: no se pudo resolver/copiar archivo=%s size=%s: %s",
+                            file_name,
+                            file_size,
+                            type(download_exc).__name__,
+                        )
 
-            async with HASH_SEMAPHORE:
+                if local_path is None or not local_path.is_file():
+                    raise RuntimeError(
+                        f"HASH LOCAL: ruta inaccesible para {file_name} ({file_size} bytes)"
+                    )
+
+                actual_size = await wait_for_complete_local_file(
+                    local_path,
+                    file_size,
+                    timeout_seconds=120,
+                )
+
                 sha256 = await asyncio.to_thread(
                     sha256_file,
                     local_path,
                 )
 
+                elapsed = time.monotonic() - started
+
+                log.info(
+                    "SHA-256 calculado | archivo=%s | informado=%s | local=%s "
+                    "| tiempo=%.2fs | digest=%s...",
+                    file_name,
+                    file_size,
+                    actual_size,
+                    elapsed,
+                    sha256[:12],
+                )
+
+            elif file_size and file_size <= MAX_HASH_DOWNLOAD:
+                telegram_file = await context.bot.get_file(file_id)
+                data = await telegram_file.download_as_bytearray()
+
+                sha256 = await asyncio.to_thread(
+                    lambda: hashlib.sha256(bytes(data)).hexdigest()
+                )
+
+            if not sha256:
+                return False
+
+            original = db.find_fingerprint(
+                chat_id,
+                sha256,
+                message_id,
+            )
+
+            # Si NO existe, se registra ANTES de liberar el semáforo.
+            # Así el siguiente archivo idéntico necesariamente lo encontrará.
+            if original is None:
+                db.store_fingerprint(
+                    chat_id=chat_id,
+                    sha256=sha256,
+                    message_id=message_id,
+                    file_unique_id=unique_id,
+                    file_name=file_name,
+                    file_size=file_size,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                )
+
+                log.info(
+                    "HUELLA registrada | archivo=%s | size=%s | digest=%s...",
+                    file_name,
+                    file_size,
+                    sha256[:12],
+                )
+
+                return False
+
+        # A partir de aquí ya sabemos que había un original registrado.
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+
+            original_name = original["file_name"] or "archivo"
+            original_sender = original["sender_name"] or "otro usuario"
+
+            try:
+                first_seen = datetime.fromisoformat(
+                    str(original["first_seen"])
+                ).astimezone(BOT_TZ)
+                first_seen_text = first_seen.strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                first_seen_text = str(original["first_seen"])
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ Pecos confirmó un archivo duplicado por contenido real.\n\n"
+                    f"📄 Original: {original_name}\n"
+                    f"👤 Enviado por: {original_sender}\n"
+                    f"🕘 Primera vez: {first_seen_text}\n\n"
+                    f"El archivo «{file_name}» tenía el mismo SHA-256 y fue retirado."
+                ),
+            )
+
+            db.add_history(
+                f"DUPLICADO eliminado por SHA-256 en chat {chat_id}: "
+                f"{file_name} == {original_name}"
+            )
+
             log.info(
-                "SHA-256 calculado | archivo=%s | size=%s | digest=%s...",
+                "DUPLICADO SHA-256 eliminado | nuevo=%s | original=%s | digest=%s...",
                 file_name,
-                file_size,
+                original_name,
                 sha256[:12],
             )
 
-        # Compatibilidad de emergencia con la Bot API pública.
-        elif file_size and file_size <= MAX_HASH_DOWNLOAD:
-            telegram_file = await context.bot.get_file(file_id)
-            data = await telegram_file.download_as_bytearray()
+            return True
 
-            sha256 = await asyncio.to_thread(
-                lambda: hashlib.sha256(bytes(data)).hexdigest()
+        except TelegramError as exc:
+            log.warning(
+                "SHA-256 duplicado detectado, pero no se pudo eliminar: %s",
+                exc,
             )
-
-        if not sha256:
             return False
-
-        original = db.find_fingerprint(
-            chat_id,
-            sha256,
-            message_id,
-        )
-
-        if original:
-            try:
-                await context.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                )
-
-                original_name = original["file_name"] or "archivo"
-                original_sender = original["sender_name"] or "otro usuario"
-
-                try:
-                    first_seen = datetime.fromisoformat(
-                        str(original["first_seen"])
-                    ).astimezone(BOT_TZ)
-                    first_seen_text = first_seen.strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    first_seen_text = str(original["first_seen"])
-
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        "⚠️ Pecos confirmó un archivo duplicado por contenido real.\\n\\n"
-                        f"📄 Original: {original_name}\\n"
-                        f"👤 Enviado por: {original_sender}\\n"
-                        f"🕘 Primera vez: {first_seen_text}\\n\\n"
-                        f"El archivo «{file_name}» tenía el mismo SHA-256 y fue retirado."
-                    ),
-                )
-
-                db.add_history(
-                    f"DUPLICADO eliminado por SHA-256 en chat {chat_id}: "
-                    f"{file_name} == {original_name}"
-                )
-                return True
-
-            except TelegramError as exc:
-                log.warning(
-                    "SHA-256 duplicado detectado, pero no se pudo eliminar: %s",
-                    exc,
-                )
-                return False
-
-        db.store_fingerprint(
-            chat_id=chat_id,
-            sha256=sha256,
-            message_id=message_id,
-            file_unique_id=unique_id,
-            file_name=file_name,
-            file_size=file_size,
-            sender_id=sender_id,
-            sender_name=sender_name,
-        )
-
-        return False
 
     except Exception as exc:
         log.warning(
