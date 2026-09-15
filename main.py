@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.9-clean-group-commands"
+VERSION = "2.5.0-phase1-personality"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -166,6 +166,29 @@ PECOS_CONTEXT_SECONDS = 120
 # inmediatamente sin haber tenido tiempo razonable de revisar reglas/archivos.
 NEW_MEMBER_RULE_WINDOW_SECONDS = 30
 NEW_MEMBER_JOINED_AT: dict[tuple[int, int], float] = {}
+
+# Evita que Pecos responda de forma contextual demasiado seguido al mismo tema.
+RECENT_CONTEXTUAL_RESPONSES: dict[tuple[int, str], float] = {}
+CONTEXTUAL_RESPONSE_COOLDOWN_SECONDS = 180
+
+KNOWN_HELPFUL_KEYWORDS = (
+    "aqui esta",
+    "aqui está",
+    "te dejo",
+    "les dejo",
+    "adjunto",
+    "solucion",
+    "solución",
+    "manual",
+    "firmware",
+    "driver",
+    "programa",
+    "software",
+    "cps",
+    "codeplug",
+)
+
+ARCHIVE_EXTENSIONS = (".rar", ".zip", ".7z")
 
 FUN_MODERATION_MESSAGES = [
     "👀 {usuario}, Pecos estaba mirando. Ese mensaje tomó un vuelo directo fuera del chat. ✈️",
@@ -354,11 +377,14 @@ FORECAST_MESSAGES = [
 ]
 
 SILENCE_MESSAGES = [
-    "🤠 ¿Qué pasó por aquí? Pecos escucha hasta los grillos.",
-    "🌵 Tanto silencio que Pecos ya empezó a conversar con un cactus.",
-    "👀 ¿Hay alguien? Pecos revisó la señal dos veces.",
-    "📡 Control de radio: silencio absoluto. Pecos reportando desde los United States.",
-    "🦗 Cri... cri... Pecos confirma presencia de grillos en el grupo.",
+    "🤠 ¿Qué pasó por aquí? Pecos escucha hasta los grillos. Ya van {horas} horas de silencio.",
+    "🌵 Tanto silencio que Pecos ya empezó a conversar con un cactus. Marcador actual: {horas} horas.",
+    "👀 ¿Hay alguien? Pecos revisó la señal dos veces. Este pueblo lleva {horas} horas en modo fantasma.",
+    "📡 Control de radio: silencio absoluto. Pecos reportando desde los United States tras {horas} horas sin movimiento.",
+    "🦗 Cri... cri... Pecos confirma presencia de grillos en el grupo. Silencio acumulado: {horas} horas.",
+    "⭐ Sheriff Pecos informa: {horas} horas de calma. O todos están ocupados... o los cactus tomaron el control.",
+    "🦅 Desde arriba solo se ven huellas viejas. Pecos calcula {horas} horas sin mensajes.",
+    "😎 Todo tranquilo por aquí... demasiado tranquilo. Pecos marca {horas} horas de silencio oficial.",
 ]
 
 WELCOME_MESSAGES = [
@@ -378,6 +404,56 @@ FAREWELLS = [
     "⭐ Que descanses, {usuario}. Pecos mantiene un ojo puesto en el chat.",
     "🦅 Nos vemos pronto, {usuario}. Pecos te vio llegar y ahora te ve partir.",
     "🎸 See you, {usuario}. Pecos queda por aquí con la música encendida.",
+]
+
+
+VETERAN_GREETINGS = [
+    "🤠 ¡Hola, {usuario}! Pecos no olvida que ya has echado una mano más de una vez por aquí.",
+    "⭐ Buen verte, {usuario}. Pecos te tiene fichado como parte útil del pueblo.",
+    "🦅 {usuario}, Pecos te saluda con respeto de veterano. Ya has dejado varias huellas útiles por aquí.",
+    "😎 ¡Buenas, {usuario}! Pecos recuerda que no vienes a mirar cactus nomás; ya has aportado al territorio.",
+    "🌵 {usuario}, Pecos te ubica. Cuando apareces, algo útil suele caer por el pueblo.",
+]
+
+CONTEXTUAL_FRUSTRATION_MESSAGES = [
+    "🤠 Tranquilo, partner. Antes de rendirse, Pecos recomienda respirar, revisar dos veces y disparar una sola.",
+    "🌵 Cuando algo no funciona, a veces el cactus no está en el equipo sino en el paso que se saltó. Pecos lo dice con cariño.",
+    "👀 Pecos ha visto problemas más feos que ese. No lo des por perdido todavía.",
+    "😎 Si todavía no funciona, no es el final. Es solo la parte del guion donde Pecos levanta una ceja y sigue buscando.",
+    "📡 Calma en la frecuencia, partner. Pecos sugiere revisar nombre, versión y conexión antes del duelo final.",
+]
+
+CONTEXTUAL_SUCCESS_MESSAGES = [
+    "🦅 Pecos toma nota: asunto resuelto. El pueblo puede seguir respirando.",
+    "🤠 Bien ahí. Pecos sospechaba que ese cactus se podía esquivar.",
+    "😎 Caso cerrado. Pecos archiva el drama y deja abierta la cantina.",
+    "⭐ Excelente. Pecos marca el expediente como resuelto y guarda el sombrero.",
+    "🌵 Pecos aprueba ese final: menos drama, más solución.",
+]
+
+CONTEXTUAL_THANKS_MESSAGES = [
+    "🤠 De nada, partner... Pecos vive para estas pequeñas victorias del pueblo.",
+    "😎 Pecos recibe el agradecimiento y lo guarda junto al sombrero bueno.",
+    "🦅 Agradecimiento recibido. Pecos sigue sobrevolando por si aparece otro cactus.",
+    "🌵 Pecos agradece el gesto. No todo en este territorio son problemas y grillos.",
+]
+
+REPEAT_DUPLICATE_WARNINGS = [
+    "🤨 Pecos toma nota: ya no es la primera copia que te retiro por aquí, partner.",
+    "🌵 Pecos recuerda que conviene mirar el corral antes de subir otro archivo. Ya llevas más de una repetición.",
+    "⭐ Sheriff Pecos marca reincidencia leve: este no es tu primer duplicado en el pueblo.",
+]
+
+REPEAT_RULE_WARNINGS = [
+    "🤠 Pecos ya te había visto llegar preguntando sin revisar el terreno. Mejor revisar reglas y archivos primero, partner.",
+    "🌵 Reincidencia leve detectada: Pecos insiste en que primero se revisa el pueblo y después se desenfunda la pregunta.",
+    "🦅 Pecos no olvida estas entradas rápidas: antes de preguntar, primero mira reglas y archivos.",
+]
+
+REPEAT_RESTRICTED_WARNINGS = [
+    "🤨 Pecos recuerda que no es la primera vez que te cruza por la puerta equivocada, partner.",
+    "🌵 Reincidencia leve: Pecos recomienda evitar de nuevo los cactus del reglamento.",
+    "⭐ Sheriff Pecos anota otro tropiezo con las reglas. Mejor no coleccionar avisos.",
 ]
 
 _last_random_index: dict[str, int] = {}
@@ -489,6 +565,23 @@ class Database:
                 local_date TEXT NOT NULL,
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, local_date)
+            );
+
+
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                helpful_score INTEGER NOT NULL DEFAULT 0,
+                greeting_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_count INTEGER NOT NULL DEFAULT 0,
+                restricted_count INTEGER NOT NULL DEFAULT 0,
+                rule_reminder_count INTEGER NOT NULL DEFAULT 0,
+                pecos_mention_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(chat_id, user_id)
             );
             """
         )
@@ -931,6 +1024,75 @@ class Database:
             self.conn.commit()
         return cur.rowcount > 0
 
+    def touch_user_profile(
+        self,
+        chat_id: int,
+        user_id: int,
+        username: str,
+        display_name: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO user_profiles(
+                    chat_id, user_id, username, display_name, first_seen, last_seen
+                )
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                    username = excluded.username,
+                    display_name = excluded.display_name,
+                    last_seen = excluded.last_seen
+                """,
+                (chat_id, user_id, username[:80], display_name[:150], now, now),
+            )
+            self.conn.commit()
+
+    def increment_user_counter(
+        self,
+        chat_id: int,
+        user_id: int,
+        username: str,
+        display_name: str,
+        counter_name: str,
+        delta: int = 1,
+    ) -> int:
+        allowed = {
+            "helpful_score",
+            "greeting_count",
+            "duplicate_count",
+            "restricted_count",
+            "rule_reminder_count",
+            "pecos_mention_count",
+        }
+        if counter_name not in allowed:
+            raise ValueError(f"Contador no permitido: {counter_name}")
+
+        self.touch_user_profile(chat_id, user_id, username, display_name)
+
+        with self.lock:
+            self.conn.execute(
+                f"UPDATE user_profiles SET {counter_name} = {counter_name} + ? WHERE chat_id = ? AND user_id = ?",
+                (max(1, int(delta)), chat_id, user_id),
+            )
+            row = self.conn.execute(
+                f"SELECT {counter_name} AS n FROM user_profiles WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            ).fetchone()
+            self.conn.commit()
+        return int(row["n"]) if row else 0
+
+    def get_user_profile(self, chat_id: int, user_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT *
+                FROM user_profiles
+                WHERE chat_id = ? AND user_id = ?
+                """,
+                (chat_id, user_id),
+            ).fetchone()
+
     def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         with self.lock:
@@ -1008,6 +1170,50 @@ def display_name(message: Message) -> str:
     return user.full_name or str(user.id)
 
 
+def user_identity_tuple(user) -> tuple[str, str]:
+    if not user:
+        return "", "amigo"
+    username = user.username or ""
+    if username:
+        shown = f"@{username}"
+    else:
+        shown = user.full_name or str(user.id)
+    return username, shown
+
+
+def remember_user_presence(message: Message) -> None:
+    user = message.from_user
+    if not user or user.is_bot:
+        return
+    username, shown = user_identity_tuple(user)
+    db.touch_user_profile(message.chat_id, user.id, username, shown)
+
+
+def increment_user_metric(message: Message, counter_name: str, delta: int = 1) -> int:
+    user = message.from_user
+    if not user or user.is_bot:
+        return 0
+    username, shown = user_identity_tuple(user)
+    return db.increment_user_counter(
+        message.chat_id,
+        user.id,
+        username,
+        shown,
+        counter_name,
+        delta,
+    )
+
+
+def get_user_metric(chat_id: int, user_id: int, counter_name: str) -> int:
+    row = db.get_user_profile(chat_id, user_id)
+    if not row:
+        return 0
+    try:
+        return int(row[counter_name])
+    except Exception:
+        return 0
+
+
 def normalize_intent(text: str) -> str:
     text = unicodedata.normalize("NFD", (text or "").lower())
     return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
@@ -1025,6 +1231,74 @@ def choose_random(category: str, choices: list[str], usuario: str) -> str:
                     break
         _last_random_index[category] = index
     return choices[index].replace("{usuario}", usuario)
+
+
+def format_hours_value(hours: float) -> str:
+    if hours < 10:
+        return f"{hours:.1f}"
+    return str(int(round(hours)))
+
+
+def build_silence_message(elapsed_hours: float) -> str:
+    template = random.choice(SILENCE_MESSAGES)
+    return template.replace("{horas}", format_hours_value(elapsed_hours))
+
+
+def has_archive_extension(file_name: str) -> bool:
+    lower = (file_name or "").casefold()
+    return any(lower.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
+
+
+def looks_like_helpful_contribution(message: Message) -> bool:
+    if message.document:
+        file_name = getattr(message.document, "file_name", "") or ""
+        if has_archive_extension(file_name):
+            return True
+
+    text_value = (message.text or message.caption or "").strip()
+    if len(text_value) < 18:
+        return False
+
+    normalized = normalize_intent(text_value)
+    return any(keyword in normalized for keyword in KNOWN_HELPFUL_KEYWORDS)
+
+
+def remember_helpful_contribution(message: Message) -> None:
+    if looks_like_helpful_contribution(message):
+        increment_user_metric(message, "helpful_score")
+
+
+def contextual_slot_available(chat_id: int, slot: str) -> bool:
+    now = time.monotonic()
+
+    expired = [
+        key for key, ts in RECENT_CONTEXTUAL_RESPONSES.items()
+        if now - ts > CONTEXTUAL_RESPONSE_COOLDOWN_SECONDS + 30
+    ]
+    for key in expired:
+        RECENT_CONTEXTUAL_RESPONSES.pop(key, None)
+
+    key = (chat_id, slot)
+    previous = RECENT_CONTEXTUAL_RESPONSES.get(key)
+    if previous is not None and now - previous <= CONTEXTUAL_RESPONSE_COOLDOWN_SECONDS:
+        return False
+
+    RECENT_CONTEXTUAL_RESPONSES[key] = now
+    return True
+
+
+def repeat_warning_text(kind: str, count: int) -> str:
+    if count < 2:
+        return ""
+
+    if kind == "duplicate":
+        return "\n\n" + random.choice(REPEAT_DUPLICATE_WARNINGS)
+    if kind == "rule":
+        return "\n\n" + random.choice(REPEAT_RULE_WARNINGS)
+    if kind == "restricted":
+        return "\n\n" + random.choice(REPEAT_RESTRICTED_WARNINGS)
+
+    return ""
 
 
 def find_blocked_term(text: str) -> str | None:
@@ -1267,7 +1541,7 @@ async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• elimina el mensaje restringido y responde con humor\n"
         "• saluda y se despide\n"
         "• puede enviar mensajes diarios\n"
-        "• encuestas, recuerdos, humor, bromas internas y reacciones\n"
+        "• encuestas, recuerdos, humor, bromas internas y reacciones\n• memoria básica de usuarios, avisos contextuales y detector de silencio con personalidad\n"
         "• administración privada mediante botones"
     )
 
@@ -2530,9 +2804,10 @@ async def handle_duplicate(
                 f"🕘 Primera vez: {first_seen_text}"
             )
 
+            duplicate_count = increment_user_metric(message, "duplicate_count")
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=message_text,
+                text=message_text + repeat_warning_text("duplicate", duplicate_count),
             )
 
             if unique_id:
@@ -2599,7 +2874,11 @@ async def moderate_if_needed(
         )
         return False
 
-    response = choose_random("moderation", FUN_MODERATION_MESSAGES, usuario)
+    restricted_count = increment_user_metric(message, "restricted_count")
+    response = (
+        choose_random("moderation", FUN_MODERATION_MESSAGES, usuario)
+        + repeat_warning_text("restricted", restricted_count)
+    )
     try:
         await context.bot.send_message(chat_id=message.chat_id, text=response)
         mark_pecos_context(message.chat_id)
@@ -2723,12 +3002,14 @@ async def handle_new_member_question(
     NEW_MEMBER_JOINED_AT.pop(key, None)
 
     usuario = display_name(message)
+    rule_count = increment_user_metric(message, "rule_reminder_count")
     await message.reply_text(
         choose_random(
             "new_user_rules",
             NEW_USER_RULE_MESSAGES,
             usuario,
         )
+        + repeat_warning_text("rule", rule_count)
     )
 
     db.add_history(
@@ -2914,6 +3195,7 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
         return False
 
     usuario = display_name(message)
+    increment_user_metric(message, "pecos_mention_count")
 
     if (
         "que opinas" in normalized
@@ -2973,6 +3255,61 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
             choose_random("pecos_called", PECOS_CALLED_MESSAGES, usuario)
         )
         return True
+
+    return False
+
+
+async def handle_contextual_phrase(message: Message) -> bool:
+    text_value = message.text or message.caption or ""
+    if not text_value:
+        return False
+
+    normalized = normalize_intent(text_value).strip()
+    if len(normalized) < 4:
+        return False
+
+    frustration_signal = (
+        "no funciona" in normalized
+        or "no sirve" in normalized
+        or "me rindo" in normalized
+        or "ya me rindo" in normalized
+        or "que desastre" in normalized
+        or "no hay caso" in normalized
+        or "sigue igual" in normalized
+    )
+
+    success_signal = (
+        "solucionado" in normalized
+        or "resuelto" in normalized
+        or "ya funciono" in normalized
+        or "ya funcionó" in normalized
+        or "era eso" in normalized
+        or "listo quedo" in normalized
+        or "listo quedó" in normalized
+        or "arreglado" in normalized
+    )
+
+    thanks_signal = (
+        "gracias pecos" in normalized
+        or "gracias grupo" in normalized
+        or normalized.strip() == "gracias"
+        or "muchas gracias" in normalized
+    )
+
+    if frustration_signal and contextual_slot_available(message.chat_id, "frustration"):
+        if random.randint(1, 100) <= 55:
+            await message.reply_text(random.choice(CONTEXTUAL_FRUSTRATION_MESSAGES))
+            return True
+
+    if success_signal and contextual_slot_available(message.chat_id, "success"):
+        if random.randint(1, 100) <= 65:
+            await message.reply_text(random.choice(CONTEXTUAL_SUCCESS_MESSAGES))
+            return True
+
+    if thanks_signal and contextual_slot_available(message.chat_id, "thanks"):
+        if random.randint(1, 100) <= 35:
+            await message.reply_text(random.choice(CONTEXTUAL_THANKS_MESSAGES))
+            return True
 
     return False
 
@@ -3141,6 +3478,7 @@ async def handle_social(message: Message) -> bool:
     )
 
     if is_farewell:
+        increment_user_metric(message, "greeting_count")
         await message.reply_text(choose_random("farewell", FAREWELLS, usuario))
         return True
 
@@ -3181,6 +3519,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Registrar solo grupos para el mensaje diario.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         db.register_group(chat)
+        remember_user_presence(message)
 
     # Si el administrador está escribiendo un dato solicitado por el menú.
     if await handle_admin_text(update, context):
@@ -3210,6 +3549,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_duplicate(message, context):
             return
 
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        remember_helpful_contribution(message)
+
     # Moderación tiene prioridad sobre saludos/respuestas.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await moderate_if_needed(message, context):
@@ -3235,6 +3580,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_direct_pecos_mention(message):
+            return
+
+        if await handle_contextual_phrase(message):
             return
 
         await maybe_react_to_message(message, context)
@@ -3275,7 +3623,7 @@ async def check_group_silence(application: Application) -> None:
         try:
             await application.bot.send_message(
                 chat_id=int(row["chat_id"]),
-                text=random.choice(SILENCE_MESSAGES),
+                text=build_silence_message(elapsed_hours),
             )
             db.add_history(
                 f"SILENCIO: Pecos habló en {row['title']} tras {elapsed_hours:.1f} h."
