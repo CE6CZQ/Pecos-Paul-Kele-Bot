@@ -27,6 +27,7 @@ import random
 import re
 import sqlite3
 import threading
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +56,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.2.0-bulkterms"
+VERSION = "1.3.0-context-identity"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -113,6 +114,12 @@ log = logging.getLogger("pecos")
 # Acciones de administración que están esperando texto del administrador.
 # No contienen datos sensibles y pueden perderse al reiniciar sin afectar config.
 PENDING_ADMIN_ACTION: dict[int, str] = {}
+
+# Contexto conversacional breve por chat.
+# Se usa para entender preguntas como "¿y este quién es?" justo después
+# de que Pecos intervino en el grupo.
+RECENT_PECOS_CONTEXT: dict[int, float] = {}
+PECOS_CONTEXT_SECONDS = 120
 
 FUN_MODERATION_MESSAGES = [
     "👀 {usuario}, Pecos estaba mirando. Ese mensaje tomó un vuelo directo fuera del chat. ✈️",
@@ -1208,6 +1215,7 @@ async def moderate_if_needed(
     response = choose_random("moderation", FUN_MODERATION_MESSAGES, usuario)
     try:
         await context.bot.send_message(chat_id=message.chat_id, text=response)
+        mark_pecos_context(message.chat_id)
     except TelegramError as exc:
         log.warning("Mensaje eliminado, pero no se pudo publicar respuesta: %s", exc)
 
@@ -1217,19 +1225,115 @@ async def moderate_if_needed(
     return True
 
 
-async def handle_identity(message: Message) -> bool:
+def mark_pecos_context(chat_id: int) -> None:
+    RECENT_PECOS_CONTEXT[chat_id] = time.monotonic()
+
+
+def has_recent_pecos_context(chat_id: int) -> bool:
+    ts = RECENT_PECOS_CONTEXT.get(chat_id)
+    if ts is None:
+        return False
+
+    if time.monotonic() - ts <= PECOS_CONTEXT_SECONDS:
+        return True
+
+    RECENT_PECOS_CONTEXT.pop(chat_id, None)
+    return False
+
+
+def is_reply_to_pecos(message: Message, bot_id: int) -> bool:
+    replied = message.reply_to_message
+    if not replied or not replied.from_user:
+        return False
+
+    return replied.from_user.id == bot_id
+
+
+async def handle_identity(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
     if not message.text:
         return False
+
     normalized = normalize_intent(message.text)
-    asks_name = (
+
+    # La pregunta debe estar realmente dirigida a Pecos.
+    mentions_pecos = bool(
+        re.search(r"\b(pecos|peco)\b", normalized)
+    )
+
+    mentions_bot = (
+        bool(re.search(r"\b(bot|robot)\b", normalized))
+        or "este bot" in normalized
+        or "ese bot" in normalized
+    )
+
+    reply_to_pecos = is_reply_to_pecos(
+        message,
+        context.bot.id,
+    )
+
+    recent_context = has_recent_pecos_context(
+        message.chat_id
+    )
+
+    # Preguntas explícitas de identidad.
+    explicit_identity_question = (
         "como te llamas" in normalized
         or "cual es tu nombre" in normalized
         or "como es tu nombre" in normalized
         or "quien eres" in normalized
+        or "quien es este bot" in normalized
+        or "quien es ese bot" in normalized
+        or "como se llama este bot" in normalized
+        or "como se llama ese bot" in normalized
     )
-    if not asks_name:
+
+    # Preguntas contextuales cortas del tipo:
+    # "¿y este quién es?", "¿y este bot?", "¿este quién es?"
+    contextual_identity_question = (
+        "y este quien es" in normalized
+        or "este quien es" in normalized
+        or "y ese quien es" in normalized
+        or "ese quien es" in normalized
+        or normalized.strip() in {
+            "y este bot",
+            "este bot",
+            "y ese bot",
+            "ese bot",
+            "y este",
+            "y ese",
+        }
+    )
+
+    directed_to_pecos = (
+        mentions_pecos
+        or mentions_bot
+        or reply_to_pecos
+        or (recent_context and contextual_identity_question)
+    )
+
+    # Regla clave:
+    # "¿Cómo te llamas?" a secas NO activa a Pecos.
+    # Debe existir una señal de que la pregunta es para él.
+    if not directed_to_pecos:
         return False
-    await message.reply_text("Mi nombre es Pecos Paul Kele, vengo de los United States.")
+
+    if not (explicit_identity_question or contextual_identity_question):
+        return False
+
+    await message.reply_text(
+        "Mi nombre es Pecos Paul Kele, vengo de los United States."
+    )
+
+    # Consumimos el contexto para que no responda repetidamente a preguntas
+    # ambiguas mucho tiempo después.
+    RECENT_PECOS_CONTEXT.pop(
+        message.chat_id,
+        None,
+    )
+
     return True
 
 
@@ -1311,7 +1415,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await moderate_if_needed(message, context):
             return
 
-    if await handle_identity(message):
+    if await handle_identity(message, context):
         return
 
     await handle_social(message)
