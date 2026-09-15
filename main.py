@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.0-final-local-sha256"
+VERSION = "2.4.1-local-api-timeout-fix"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -3049,7 +3049,21 @@ def build_application() -> Application:
             "Falta BOT_TOKEN. Configúralo como variable de entorno en Railway."
         )
 
-    builder = Application.builder().token(BOT_TOKEN)
+    # El Bot API local puede tardar más de los 5 s por defecto mientras
+    # está materializando archivos grandes. Damos margen suficiente para
+    # que /start, respuestas y botones no fallen por un timeout artificial.
+    builder = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(15.0)
+        .read_timeout(60.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .connection_pool_size(64)
+        .get_updates_connect_timeout(15.0)
+        .get_updates_read_timeout(60.0)
+        .get_updates_pool_timeout(30.0)
+    )
 
     if LOCAL_BOT_API:
         builder = (
