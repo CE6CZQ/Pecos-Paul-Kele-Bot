@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.3-stable-personality-preserved"
+VERSION = "2.4.5-clean-duplicate-message"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -2113,6 +2113,32 @@ async def get_file_resilient(
     raise RuntimeError(f"No se pudo obtener getFile para {file_name}")
 
 
+def build_message_link(chat: Chat, message_id: int) -> str | None:
+    """
+    Construye un enlace directo al mensaje original sin tocar la lógica
+    de duplicados.
+
+    - Grupo/supergrupo público: https://t.me/usuario/message_id
+    - Supergrupo privado:       https://t.me/c/id_interno/message_id
+
+    Si Telegram no permite construir un enlace directo para ese tipo de chat,
+    devuelve None.
+    """
+    username = getattr(chat, "username", None)
+
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+
+    chat_id_text = str(chat.id)
+
+    if chat_id_text.startswith("-100"):
+        internal_id = chat_id_text[4:]
+        if internal_id:
+            return f"https://t.me/c/{internal_id}/{message_id}"
+
+    return None
+
+
 def media_info(message: Message):
     obj = None
     if message.document:
@@ -2330,18 +2356,31 @@ async def handle_duplicate(
             except Exception:
                 first_seen_text = str(original["first_seen"])
 
+            original_message_id = int(original["message_id"])
+            original_link = build_message_link(
+                message.chat,
+                original_message_id,
+            )
+
             funny_text = random.choice(DUPLICATE_HASH_MESSAGES)
+
+            message_text = (
+                funny_text
+                + "\n\n"
+                + f"📄 Original: {original_name}\n"
+            )
+
+            if original_link:
+                message_text += f"🔗 Archivo original: {original_link}\n"
+
+            message_text += (
+                f"👤 Enviado por: {original_sender}\n"
+                f"🕘 Primera vez: {first_seen_text}"
+            )
+
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    funny_text
-                    + "\n\n"
-                    + f"📄 Original: {original_name}\n"
-                    + f"📄 Repetido: {file_name}\n"
-                    + f"👤 Enviado por: {original_sender}\n"
-                    + f"🕘 Primera vez: {first_seen_text}\n"
-                    + "🔐 Coincidencia confirmada por SHA-256."
-                ),
+                text=message_text,
             )
 
             if unique_id:
