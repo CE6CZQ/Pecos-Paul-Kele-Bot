@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 from telegram import (
     BotCommand,
     BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
     BotCommandScopeChat,
     Chat,
     InlineKeyboardButton,
@@ -56,7 +57,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.5.0-special-daily-persistent"
+VERSION = "2.0.0-social-tools"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -202,6 +203,78 @@ NIGHT_GREETINGS = [
     "🦉 ¡Buenas noches, {usuario}! Parece que Pecos también es nocturno.",
 ]
 
+PECOS_CALLED_MESSAGES = [
+    "🤠 Aquí estoy. ¿Me llamaban?",
+    "👀 Pecos presente. Te escucho.",
+    "🌵 Aquí anda Pecos, firme en el territorio.",
+    "📡 Señal recibida. Pecos está en línea.",
+    "😎 Dime, partner. Pecos escucha.",
+]
+
+PECOS_OPINION_MESSAGES = [
+    "🤔 Pecos opina que antes de disparar hay que mirar bien el blanco... pero algo de razón debe haber por ahí.",
+    "🤠 Mi opinión desde los United States: interesante asunto. Yo lo pensaría dos veces antes de decidir.",
+    "🌵 Pecos dice: hay temas que parecen simples hasta que uno pisa el cactus. 😅",
+    "👀 Estoy mirando el asunto, partner. No prometo sabiduría, pero sí atención.",
+    "😎 Pecos tiene una opinión... pero hoy cobra barato: primero cuéntame un poco más.",
+]
+
+PECOS_QUESTION_MESSAGES = [
+    "🤠 Buena pregunta. Pecos está procesando el asunto con tecnología del lejano oeste.",
+    "👀 Mmm... eso merece pensarlo un poco, partner.",
+    "🌵 Pecos no tiene todas las respuestas, pero sí una sospecha bastante elegante.",
+    "😎 Interesante. Déjame ponerme el sombrero de pensar.",
+]
+
+ADVICE_MESSAGES = [
+    "🤠 Consejo de Pecos: si vas a equivocarte, que por lo menos sea con estilo.",
+    "🌵 No corras detrás de todos los problemas. Algunos se cansan y se van solos.",
+    "👀 Mira dos veces, habla una y guarda una salida de emergencia.",
+    "😎 Si algo funciona, no lo arregles a las tres de la mañana.",
+    "🦅 Pecos aconseja: toma distancia antes de decidir; desde arriba se ven mejor los cactus.",
+    "☕ Antes de una decisión importante: café. Después vemos el resto.",
+]
+
+PHRASE_MESSAGES = [
+    "🤠 «La experiencia es eso que llega justo después de que la necesitabas.» — Pecos",
+    "🌵 «No todo cactus pincha; pero Pecos igual mira antes de sentarse.»",
+    "😎 «La paciencia es importante, excepto cuando el café ya está listo.»",
+    "🦅 «A veces avanzar es saber qué camino no volver a tomar.»",
+    "📡 «Si nadie responde, revisa la señal antes de culpar al universo.»",
+]
+
+EXCUSE_MESSAGES = [
+    "🤠 Excusa oficial de Pecos: «Se me cruzó un cactus en el camino.»",
+    "📡 «No llegué tarde; tuve una interferencia internacional de comunicaciones.»",
+    "🌵 «Yo iba a hacerlo, pero el lejano oeste tenía otros planes.»",
+    "😎 «Estaba listo... hasta que apareció una actualización.»",
+    "🦅 «Lo vi venir desde lejos y aun así decidí ignorarlo.»",
+]
+
+FORECAST_MESSAGES = [
+    "🔮 Pronóstico Pecos: 80% de probabilidades de que hoy alguien diga «yo no fui».",
+    "🤠 Se esperan períodos de tranquilidad con ráfagas repentinas de mensajes.",
+    "🌵 Pronóstico: ambiente estable, con riesgo moderado de pisar algún cactus.",
+    "📡 Pecos detecta alta probabilidad de café y conversaciones inesperadas.",
+    "😎 El futuro está parcialmente nublado, pero Pecos recomienda seguir igual.",
+]
+
+SILENCE_MESSAGES = [
+    "🤠 ¿Qué pasó por aquí? Pecos escucha hasta los grillos.",
+    "🌵 Tanto silencio que Pecos ya empezó a conversar con un cactus.",
+    "👀 ¿Hay alguien? Pecos revisó la señal dos veces.",
+    "📡 Control de radio: silencio absoluto. Pecos reportando desde los United States.",
+    "🦗 Cri... cri... Pecos confirma presencia de grillos en el grupo.",
+]
+
+WELCOME_MESSAGES = [
+    "🤠 Bienvenido, {usuario}. Pecos te vigila… digo, te da la bienvenida.",
+    "🌵 ¡Bienvenido, {usuario}! Pasa con confianza; cuidado solamente con los cactus.",
+    "👋 Hola, {usuario}. Pecos Paul Kele te da la bienvenida al territorio.",
+    "😎 Bienvenido, {usuario}. Aquí Pecos; cualquier cosa, yo no fui.",
+    "🦅 Pecos vio llegar a {usuario} desde lejos. ¡Bienvenido!",
+]
+
 FAREWELLS = [
     "👋 ¡Nos vemos, {usuario}! Pecos queda de guardia por aquí.",
     "🤠 Hasta luego, partner {usuario}. Pecos te guarda el lugar.",
@@ -278,6 +351,32 @@ class Database:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(event_key, user_id, local_date)
             );
+
+
+            CREATE TABLE IF NOT EXISTS user_jokes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL COLLATE NOCASE,
+                response TEXT NOT NULL,
+                probability INTEGER NOT NULL DEFAULT 35,
+                created_by INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS group_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_by INTEGER NOT NULL DEFAULT 0,
+                created_by_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS silence_notices (
+                chat_id INTEGER NOT NULL,
+                local_date TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, local_date)
+            );
             """
         )
         self.conn.commit()
@@ -290,6 +389,8 @@ class Database:
             # Desactivado por defecto en producción para evitar sorpresas.
             "duplicates_enabled": "0",
             "last_daily_sent_date": "",
+            "silence_enabled": "1",
+            "silence_hours": "8",
         }
         with self.lock:
             for key, value in defaults.items():
@@ -487,6 +588,122 @@ class Database:
             self.conn.commit()
         return unique_count, hash_count
 
+    def add_jokes(self, entries: list[tuple[str, int, str]], created_by: int) -> int:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        added = 0
+        with self.lock:
+            for username, probability, response in entries:
+                self.conn.execute(
+                    """
+                    INSERT INTO user_jokes(username, response, probability, created_by, created_at)
+                    VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username.lstrip("@").strip().casefold(),
+                        response.strip(),
+                        max(1, min(100, int(probability))),
+                        created_by,
+                        now,
+                    ),
+                )
+                added += 1
+            self.conn.commit()
+        return added
+
+    def list_jokes(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT id, username, response, probability, created_at
+                FROM user_jokes
+                ORDER BY id
+                """
+            ).fetchall()
+
+    def remove_jokes(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.lock:
+            cur = self.conn.execute(
+                f"DELETE FROM user_jokes WHERE id IN ({placeholders})",
+                tuple(ids),
+            )
+            self.conn.commit()
+        return int(cur.rowcount)
+
+    def add_memory(
+        self,
+        chat_id: int,
+        text_value: str,
+        created_by: int,
+        created_by_name: str,
+    ) -> int:
+        now = datetime.now(BOT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            cur = self.conn.execute(
+                """
+                INSERT INTO group_memories
+                    (chat_id, text, created_by, created_by_name, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    text_value[:800],
+                    created_by,
+                    created_by_name[:150],
+                    now,
+                ),
+            )
+            self.conn.commit()
+            return int(cur.lastrowid)
+
+    def list_memories(self, chat_id: int, limit: int = 30) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT id, text, created_by, created_by_name, created_at
+                FROM group_memories
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+
+    def delete_memory(self, chat_id: int, memory_id: int, requester_id: int, admin: bool) -> bool:
+        with self.lock:
+            if admin:
+                cur = self.conn.execute(
+                    "DELETE FROM group_memories WHERE chat_id = ? AND id = ?",
+                    (chat_id, memory_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    DELETE FROM group_memories
+                    WHERE chat_id = ? AND id = ? AND created_by = ?
+                    """,
+                    (chat_id, memory_id, requester_id),
+                )
+            self.conn.commit()
+        return cur.rowcount > 0
+
+    def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO silence_notices(chat_id, local_date, sent_at)
+                VALUES(?, ?, ?)
+                """,
+                (chat_id, local_date, now),
+            )
+            inserted = self.conn.total_changes > before
+            self.conn.commit()
+        return inserted
+
     def claim_daily_user_event(
         self,
         event_key: str,
@@ -643,6 +860,10 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📊 Ver estado", callback_data="menu:status"),
                 InlineKeyboardButton("📜 Historial", callback_data="menu:history"),
             ],
+            [
+                InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes"),
+                InlineKeyboardButton("🌵 Silencio", callback_data="menu:silence"),
+            ],
             [InlineKeyboardButton("📦 Duplicados", callback_data="menu:dups")],
             [InlineKeyboardButton("🆔 Mi ID", callback_data="pub:id")],
         ]
@@ -692,6 +913,31 @@ def daily_menu() -> InlineKeyboardMarkup:
     )
 
 
+def jokes_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 Ver bromas", callback_data="jokes:list"),
+                InlineKeyboardButton("➕ Agregar", callback_data="jokes:add"),
+            ],
+            [InlineKeyboardButton("➖ Eliminar por ID", callback_data="jokes:remove")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
+def silence_menu() -> InlineKeyboardMarkup:
+    enabled = db.is_true("silence_enabled")
+    toggle_text = "🔴 Desactivar" if enabled else "🟢 Activar"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(toggle_text, callback_data="silence:toggle")],
+            [InlineKeyboardButton("⏱️ Cambiar horas", callback_data="silence:hours")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
 def duplicates_menu() -> InlineKeyboardMarkup:
     enabled = db.is_true("duplicates_enabled")
     toggle_text = "🔴 Desactivar detección" if enabled else "🟢 Activar detección"
@@ -725,6 +971,7 @@ async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• elimina el mensaje restringido y responde con humor\n"
         "• saluda y se despide\n"
         "• puede enviar mensajes diarios\n"
+        "• encuestas, recuerdos, humor, bromas internas y reacciones\n"
         "• administración privada mediante botones"
     )
 
@@ -778,6 +1025,167 @@ async def command_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     PENDING_ADMIN_ACTION.pop(user.id, None)
     await message.reply_text("⚙️ Configuración de Pecos", reply_markup=main_menu())
+
+
+async def command_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    raw = " ".join(context.args).strip()
+    if not raw:
+        await message.reply_text(
+            "Uso:\n"
+            "/encuesta ¿Asado sábado?\n\n"
+            "O con opciones propias:\n"
+            "/encuesta ¿Qué comemos? | Pizza | Asado | Empanadas"
+        )
+        return
+
+    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    question = parts[0]
+
+    if not (1 <= len(question) <= 300):
+        await message.reply_text("La pregunta debe tener entre 1 y 300 caracteres.")
+        return
+
+    options = parts[1:] if len(parts) >= 3 else ["Sí", "No", "Quizás"]
+    options = options[:10]
+
+    if len(options) < 2:
+        await message.reply_text("Necesito al menos dos opciones.")
+        return
+
+    try:
+        await context.bot.send_poll(
+            chat_id=chat.id,
+            question=question,
+            options=options,
+            is_anonymous=False,
+        )
+    except TelegramError as exc:
+        await message.reply_text(f"No pude crear la encuesta: {exc}")
+
+
+async def command_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("«Pecos recuerda» está pensado para usarse dentro del grupo.")
+        return
+
+    memory_text = " ".join(context.args).strip()
+    if not memory_text:
+        await message.reply_text(
+            "Uso:\n/recordar reunión viernes 20:00"
+        )
+        return
+
+    if len(memory_text) > 800:
+        await message.reply_text("Ese recuerdo es demasiado largo. Máximo 800 caracteres.")
+        return
+
+    memory_id = db.add_memory(
+        chat.id,
+        memory_text,
+        user.id,
+        display_name(message),
+    )
+
+    await message.reply_text(
+        f"🧠 Pecos lo recuerda. ID #{memory_id}\n"
+        f"«{memory_text}»"
+    )
+
+
+async def command_memories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("Los recuerdos pertenecen a cada grupo.")
+        return
+
+    rows = db.list_memories(chat.id, 30)
+
+    if not rows:
+        await message.reply_text("🧠 Pecos no tiene recuerdos guardados en este grupo.")
+        return
+
+    lines = ["🧠 Recuerdos del grupo:\n"]
+    for row in reversed(rows):
+        lines.append(
+            f"#{row['id']} — {row['text']}\n"
+            f"   {row['created_by_name']} · {row['created_at']}"
+        )
+
+    await send_long_text(chat.id, "\n\n".join(lines), context)
+
+
+async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await message.reply_text("Uso: /olvidar 12")
+        return
+
+    memory_id = int(context.args[0])
+    deleted = db.delete_memory(
+        chat.id,
+        memory_id,
+        user.id,
+        is_admin(user.id),
+    )
+
+    if deleted:
+        await message.reply_text(f"🧠 Pecos olvidó el recuerdo #{memory_id}.")
+    else:
+        await message.reply_text(
+            "No encontré ese recuerdo o no tienes permiso para borrarlo."
+        )
+
+
+async def command_pecos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            choose_random("pecos_command", PECOS_CALLED_MESSAGES, display_name(message))
+        )
+
+
+async def command_advice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(random.choice(ADVICE_MESSAGES))
+
+
+async def command_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(random.choice(PHRASE_MESSAGES))
+
+
+async def command_excuse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(random.choice(EXCUSE_MESSAGES))
+
+
+async def command_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(random.choice(FORECAST_MESSAGES))
 
 
 async def command_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -848,6 +1256,94 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text(
             f"✅ Hora diaria guardada: {text}",
             reply_markup=daily_menu(),
+        )
+        return True
+
+    if action == "jokes:add":
+        entries: list[tuple[str, int, str]] = []
+        errors = []
+
+        for raw_line in text.replace("\r", "\n").split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            parts = [part.strip() for part in line.split("|", 2)]
+            if len(parts) != 3:
+                errors.append(line)
+                continue
+
+            username = parts[0].lstrip("@").strip()
+            try:
+                probability = int(parts[1])
+            except ValueError:
+                errors.append(line)
+                continue
+
+            response = parts[2].strip()
+
+            if not username or not response or not (1 <= probability <= 100):
+                errors.append(line)
+                continue
+
+            entries.append((username, probability, response))
+
+        if not entries:
+            await message.reply_text(
+                "No pude agregar ninguna broma.\n\n"
+                "Usa este formato, una por línea:\n"
+                "@usuario | 35 | frase de Pecos\n\n"
+                "El número es la probabilidad entre 1 y 100.\n"
+                "Usa /cancel para cancelar."
+            )
+            return True
+
+        added = db.add_jokes(entries, user.id)
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: agregó {added} broma(s) interna(s).")
+
+        result = f"✅ Se agregaron {added} broma(s)."
+        if errors:
+            result += f"\n⚠️ {len(errors)} línea(s) no tenían el formato correcto."
+
+        await message.reply_text(result, reply_markup=jokes_menu())
+        return True
+
+    if action == "jokes:remove":
+        ids = []
+        for token in re.split(r"[,;\s]+", text):
+            token = token.strip()
+            if token.isdigit():
+                ids.append(int(token))
+
+        removed = db.remove_jokes(ids)
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: eliminó {removed} broma(s) interna(s).")
+        await message.reply_text(
+            f"✅ Se eliminaron {removed} broma(s).",
+            reply_markup=jokes_menu(),
+        )
+        return True
+
+    if action == "silence:hours":
+        try:
+            hours = int(text)
+        except ValueError:
+            hours = 0
+
+        if not (1 <= hours <= 72):
+            await message.reply_text(
+                "Escribe un número entero entre 1 y 72.\n"
+                "Ejemplo: 8\n\nUsa /cancel para cancelar."
+            )
+            return True
+
+        db.set_setting("silence_hours", str(hours))
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: detector de silencio configurado en {hours} hora(s).")
+        await message.reply_text(
+            f"✅ Pecos hablará después de {hours} hora(s) de silencio, máximo una vez al día.",
+            reply_markup=silence_menu(),
         )
         return True
 
@@ -995,6 +1491,93 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    if data == "menu:jokes":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await safe_edit(
+            query,
+            f"🎭 Bromas internas\n\nConfiguradas: {len(db.list_jokes())}",
+            jokes_menu(),
+        )
+        return
+
+    if data == "jokes:list":
+        rows = db.list_jokes()
+        if not rows:
+            await query.message.reply_text("🎭 No hay bromas internas configuradas.")
+            return
+
+        lines = ["🎭 Bromas internas:\n"]
+        for row in rows:
+            lines.append(
+                f"ID {row['id']} — @{row['username']} — {row['probability']}%\n"
+                f"↳ {row['response']}"
+            )
+
+        await send_long_text(chat.id, "\n\n".join(lines), context)
+        return
+
+    if data == "jokes:add":
+        PENDING_ADMIN_ACTION[user_id] = "jokes:add"
+        await query.message.reply_text(
+            "➕ Envíame una o varias bromas, una por línea.\n\n"
+            "Formato:\n"
+            "@usuario | probabilidad | respuesta\n\n"
+            "Ejemplo:\n"
+            "@juan | 35 | 👀 Cada vez que nombran a Juan, Pecos sospecha algo.\n"
+            "@pedro | 20 | 🤠 Pedro apareció en la conversación. Esto se pone interesante.\n\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "jokes:remove":
+        PENDING_ADMIN_ACTION[user_id] = "jokes:remove"
+        await query.message.reply_text(
+            "➖ Envíame los ID de las bromas que quieras eliminar.\n\n"
+            "Ejemplo:\n1, 3, 5\n\n"
+            "Puedes ver los ID con «Ver bromas».\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "menu:silence":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await safe_edit(
+            query,
+            "🌵 Detector de silencio\n\n"
+            f"Estado: {'ACTIVO' if db.is_true('silence_enabled') else 'DESACTIVADO'}\n"
+            f"Tiempo: {db.get_setting('silence_hours', '8')} hora(s)\n"
+            "Máximo: una intervención por grupo al día\n"
+            "Horario: 09:00–22:00",
+            silence_menu(),
+        )
+        return
+
+    if data == "silence:toggle":
+        enabled = not db.is_true("silence_enabled")
+        db.set_setting("silence_enabled", "1" if enabled else "0")
+        db.add_history(
+            f"ADMIN: detector de silencio {'activado' if enabled else 'desactivado'}."
+        )
+        await safe_edit(
+            query,
+            "🌵 Detector de silencio\n\n"
+            f"Estado: {'ACTIVO' if enabled else 'DESACTIVADO'}\n"
+            f"Tiempo: {db.get_setting('silence_hours', '8')} hora(s)\n"
+            "Máximo: una intervención por grupo al día\n"
+            "Horario: 09:00–22:00",
+            silence_menu(),
+        )
+        return
+
+    if data == "silence:hours":
+        PENDING_ADMIN_ACTION[user_id] = "silence:hours"
+        await query.message.reply_text(
+            "⏱️ ¿Después de cuántas horas de silencio debe hablar Pecos?\n\n"
+            "Escribe un número entre 1 y 72.\n"
+            "Ejemplo: 8\n\nUsa /cancel para cancelar."
+        )
+        return
+
     if data == "menu:daily":
         PENDING_ADMIN_ACTION.pop(user_id, None)
         status = "ACTIVO" if db.is_true("daily_enabled") else "DESACTIVADO"
@@ -1053,6 +1636,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Grupos conocidos: {len(groups)}\n"
             f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
             f"Hora diaria: {db.get_setting('daily_time')} ({TIMEZONE_NAME})\n"
+            f"Bromas internas: {len(db.list_jokes())}\n"
+            f"Detector de silencio: {'Activo' if db.is_true('silence_enabled') else 'Desactivado'} "
+            f"({db.get_setting('silence_hours', '8')} h)\n"
             f"Duplicados: {'Activo' if db.is_true('duplicates_enabled') else 'Desactivado'}\n"
             f"FileUniqueId registrados: {unique_count}\n"
             f"SHA-256 registrados: {hash_count}\n"
@@ -1414,6 +2000,154 @@ async def handle_identity(
     return True
 
 
+async def handle_new_members(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    members = message.new_chat_members or []
+    real_members = [
+        member for member in members
+        if member.id != context.bot.id
+    ]
+
+    if not real_members:
+        return False
+
+    for member in real_members:
+        if member.username:
+            usuario = f"@{member.username}"
+        else:
+            usuario = member.full_name or str(member.id)
+
+        await message.reply_text(
+            choose_random("welcome", WELCOME_MESSAGES, usuario)
+        )
+
+        db.add_history(f"BIENVENIDA a {usuario} en chat {message.chat_id}.")
+
+    return True
+
+
+async def handle_internal_joke(message: Message) -> bool:
+    text_value = message.text or message.caption or ""
+    if not text_value:
+        return False
+
+    normalized = text_value.casefold()
+
+    for row in db.list_jokes():
+        username = str(row["username"]).casefold()
+
+        if not re.search(
+            rf"(?<![\w])@{re.escape(username)}(?![\w])",
+            normalized,
+        ):
+            continue
+
+        if random.randint(1, 100) <= int(row["probability"]):
+            await message.reply_text(str(row["response"]))
+            return True
+
+    return False
+
+
+async def handle_direct_pecos_mention(message: Message) -> bool:
+    if not message.text:
+        return False
+
+    normalized = normalize_intent(message.text).strip()
+
+    if not re.search(r"\b(pecos|peco)\b", normalized):
+        return False
+
+    usuario = display_name(message)
+
+    if (
+        "que opinas" in normalized
+        or "que piensas" in normalized
+        or "que dices" in normalized
+        or "tu opinion" in normalized
+    ):
+        await message.reply_text(
+            choose_random("pecos_opinion", PECOS_OPINION_MESSAGES, usuario)
+        )
+        return True
+
+    if (
+        "estas ahi" in normalized
+        or "andas por ahi" in normalized
+        or "me escuchas" in normalized
+        or normalized in {"pecos", "peco", "oye pecos", "oye peco"}
+    ):
+        await message.reply_text(
+            choose_random("pecos_called", PECOS_CALLED_MESSAGES, usuario)
+        )
+        return True
+
+    if "ayuda" in normalized or "ayudame" in normalized:
+        await message.reply_text(
+            f"🤠 Aquí estoy, {usuario}. Dime qué necesitas y Pecos hará lo que pueda."
+        )
+        return True
+
+    if "?" in message.text:
+        await message.reply_text(
+            choose_random("pecos_question", PECOS_QUESTION_MESSAGES, usuario)
+        )
+        return True
+
+    # Si solo lo nombran en una frase normal, responde ocasionalmente para no invadir.
+    if random.randint(1, 100) <= 35:
+        await message.reply_text(
+            choose_random("pecos_called", PECOS_CALLED_MESSAGES, usuario)
+        )
+        return True
+
+    return False
+
+
+async def maybe_react_to_message(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not message.text:
+        return False
+
+    normalized = normalize_intent(message.text)
+    emoji = None
+    probability = 0
+
+    if re.search(r"\b(jaja+|jeje+|jiji+|lol|xd)\b", normalized) or "😂" in message.text or "🤣" in message.text:
+        emoji = "😂"
+        probability = 65
+    elif any(word in normalized for word in ("gracias", "excelente", "genial", "perfecto", "buena noticia")):
+        emoji = random.choice(["👍", "❤️", "👏"])
+        probability = 55
+    elif any(word in normalized for word in ("felicitaciones", "felicidades", "bravo")):
+        emoji = random.choice(["🎉", "🔥", "👏"])
+        probability = 75
+    elif "que opinan" in normalized or "que piensan" in normalized:
+        emoji = "🤔"
+        probability = 45
+    elif any(word in normalized for word in ("miren", "mira esto", "vean esto")):
+        emoji = "👀"
+        probability = 40
+
+    if not emoji or random.randint(1, 100) > probability:
+        return False
+
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+            reaction=emoji,
+        )
+        return True
+    except TelegramError:
+        # Si el grupo no permite esa reacción, Pecos simplemente no insiste.
+        return False
+
+
 async def handle_special_daily_user_greeting(
     message: Message,
 ) -> bool:
@@ -1565,6 +2299,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not message or not chat:
         return
 
+    # Los eventos de nuevos miembros pueden llegar como mensajes de servicio.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if message.new_chat_members:
+            await handle_new_members(message, context)
+
     if user and user.is_bot:
         return
 
@@ -1574,6 +2313,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Si el administrador está escribiendo un dato solicitado por el menú.
     if await handle_admin_text(update, context):
+        return
+
+    # Los CommandHandler ya procesaron los comandos en el grupo 0.
+    # Evitamos que un comando como /pecos produzca una segunda respuesta aquí.
+    if message.text and message.text.startswith("/"):
         return
 
     is_edited = bool(update.edited_message or update.edited_channel_post)
@@ -1604,16 +2348,72 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_collective_greeting(message):
             return
 
+        if await handle_internal_joke(message):
+            return
+
     if await handle_identity(message, context):
         return
 
-    await handle_social(message)
+    if await handle_social(message):
+        return
+
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_direct_pecos_mention(message):
+            return
+
+        await maybe_react_to_message(message, context)
+
+
+async def check_group_silence(application: Application) -> None:
+    if not db.is_true("silence_enabled"):
+        return
+
+    now = datetime.now(BOT_TZ)
+
+    # Evita que Pecos rompa el silencio durante la madrugada.
+    if not (9 <= now.hour < 22):
+        return
+
+    try:
+        silence_hours = int(db.get_setting("silence_hours", "8"))
+    except ValueError:
+        silence_hours = 8
+
+    silence_hours = max(1, min(72, silence_hours))
+    today = now.strftime("%Y-%m-%d")
+
+    for row in db.list_groups():
+        try:
+            last_seen = datetime.fromisoformat(str(row["last_seen"]))
+        except Exception:
+            continue
+
+        elapsed_hours = (now - last_seen).total_seconds() / 3600.0
+
+        if elapsed_hours < silence_hours:
+            continue
+
+        if not db.claim_silence_notice(int(row["chat_id"]), today):
+            continue
+
+        try:
+            await application.bot.send_message(
+                chat_id=int(row["chat_id"]),
+                text=random.choice(SILENCE_MESSAGES),
+            )
+            db.add_history(
+                f"SILENCIO: Pecos habló en {row['title']} tras {elapsed_hours:.1f} h."
+            )
+        except TelegramError as exc:
+            log.warning("No se pudo romper el silencio en %s: %s", row["chat_id"], exc)
 
 
 async def daily_loop(application: Application) -> None:
     while True:
         try:
             now = datetime.now(BOT_TZ)
+            await check_group_silence(application)
+
             if db.is_true("daily_enabled"):
                 daily_time = db.get_setting("daily_time", "09:00")
                 today = now.strftime("%Y-%m-%d")
@@ -1657,9 +2457,27 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Abrir el menú de Pecos"),
         BotCommand("id", "Ver mi Telegram User ID"),
     ]
+
+    group_commands = [
+        BotCommand("encuesta", "Crear una encuesta rápida"),
+        BotCommand("recordar", "Guardar un recuerdo del grupo"),
+        BotCommand("recuerdos", "Ver recuerdos del grupo"),
+        BotCommand("olvidar", "Borrar un recuerdo propio por ID"),
+        BotCommand("pecos", "Llamar a Pecos"),
+        BotCommand("consejo", "Pedir un consejo a Pecos"),
+        BotCommand("frase", "Frase de Pecos"),
+        BotCommand("excusa", "Generar una excusa"),
+        BotCommand("pronostico", "Pronóstico de Pecos"),
+    ]
     await application.bot.set_my_commands(
         private_commands,
         scope=BotCommandScopeAllPrivateChats(),
+    )
+
+
+    await application.bot.set_my_commands(
+        group_commands,
+        scope=BotCommandScopeAllGroupChats(),
     )
 
     if ADMIN_USER_IDS:
@@ -1730,6 +2548,15 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("id", command_id), group=0)
     app.add_handler(CommandHandler("config", command_config), group=0)
     app.add_handler(CommandHandler("cancel", command_cancel), group=0)
+    app.add_handler(CommandHandler("encuesta", command_poll), group=0)
+    app.add_handler(CommandHandler("recordar", command_remember), group=0)
+    app.add_handler(CommandHandler("recuerdos", command_memories), group=0)
+    app.add_handler(CommandHandler("olvidar", command_forget), group=0)
+    app.add_handler(CommandHandler("pecos", command_pecos), group=0)
+    app.add_handler(CommandHandler("consejo", command_advice), group=0)
+    app.add_handler(CommandHandler("frase", command_phrase), group=0)
+    app.add_handler(CommandHandler("excusa", command_excuse), group=0)
+    app.add_handler(CommandHandler("pronostico", command_forecast), group=0)
 
     # Botones.
     app.add_handler(CallbackQueryHandler(callback_router), group=0)
