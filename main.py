@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.1-local-api-timeout-fix"
+VERSION = "2.4.3-stable-personality-preserved"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -183,6 +183,29 @@ FUN_MODERATION_MESSAGES = [
     "🛂 Control fronterizo de Pecos: mensaje no autorizado. Acceso denegado.",
     "🚂 Ese mensaje tomó el tren equivocado. Pecos lo mandó de vuelta.",
     "⭐ Sheriff Pecos en servicio: mensaje retirado. Continúen, ciudadanos.",
+]
+
+
+DUPLICATE_QUICK_MESSAGES = [
+    "🤠 Easy, partner... Pecos ya vio ese archivo cabalgar por aquí. La segunda copia vuelve al saloon. 🌵",
+    "👀 Pecos tiene memoria de sheriff: ese archivo ya pasó por este territorio. Duplicado retirado.",
+    "🚨 Houston, tenemos un repetido. Pecos lo reconoció al instante y lo mandó de vuelta. 😎",
+    "🦅 Pecos lo vio venir desde lejos... mismo archivo, segundo viaje. Copia retirada.",
+    "🌵 Ese archivo intentó volver a entrar al pueblo. Pecos dijo: «una vez basta, partner».",
+    "⭐ Sheriff Pecos reporta: archivo conocido, copia detectada y retirada.",
+    "😂 Casi pasa otra vez... pero Pecos no nació ayer. Duplicado fuera.",
+    "📡 Señal recibida desde los United States: archivo repetido detectado. Pecos se encargó.",
+]
+
+DUPLICATE_HASH_MESSAGES = [
+    "🕵️ Cambiaste el nombre, pero no engañaste a Pecos: por dentro es exactamente el mismo archivo. 😎",
+    "🤠 Nuevo sombrero, mismo cowboy... Pecos revisó los bytes y encontró un duplicado.",
+    "🌵 Ese archivo llegó disfrazado con otro nombre, pero Pecos reconoció su huella. Copia retirada.",
+    "👀 El nombre decía una cosa, el SHA-256 contó la verdad. Pecos encontró el duplicado.",
+    "🎯 Pecos apuntó al contenido, no al nombre. Resultado: duplicado confirmado y retirado.",
+    "🦅 Desde lejos parecía distinto; de cerca tenía exactamente la misma huella. Pecos lo retiró.",
+    "🚂 Cambió de nombre, pero tomó el mismo tren de bytes. Pecos mandó la copia de regreso.",
+    "⭐ Caso cerrado por Sheriff Pecos: mismo contenido, distinto nombre, duplicado eliminado.",
 ]
 
 COLLECTIVE_GREETINGS = [
@@ -2162,12 +2185,14 @@ async def handle_duplicate(
                     chat_id=chat_id,
                     message_id=message_id,
                 )
+                funny_text = random.choice(DUPLICATE_QUICK_MESSAGES)
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        "⚠️ Pecos retiró un archivo duplicado.\n\n"
-                        f"📄 Archivo: {file_name}\n"
-                        "🔎 Coincidencia: FileUniqueId de Telegram."
+                        funny_text
+                        + "\n\n"
+                        + f"📄 Archivo: {file_name}\n"
+                        + "🔎 Pecos lo reconoció al instante."
                     ),
                 )
                 db.add_history(
@@ -2305,15 +2330,17 @@ async def handle_duplicate(
             except Exception:
                 first_seen_text = str(original["first_seen"])
 
+            funny_text = random.choice(DUPLICATE_HASH_MESSAGES)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "⚠️ Pecos confirmó un archivo duplicado por contenido real.\n\n"
-                    f"📄 Original: {original_name}\n"
-                    f"👤 Enviado por: {original_sender}\n"
-                    f"🕘 Primera vez: {first_seen_text}\n"
-                    f"📦 Tamaño: {file_size} bytes\n\n"
-                    f"El archivo «{file_name}» tenía el mismo SHA-256 y fue retirado."
+                    funny_text
+                    + "\n\n"
+                    + f"📄 Original: {original_name}\n"
+                    + f"📄 Repetido: {file_name}\n"
+                    + f"👤 Enviado por: {original_sender}\n"
+                    + f"🕘 Primera vez: {first_seen_text}\n"
+                    + "🔐 Coincidencia confirmada por SHA-256."
                 ),
             )
 
