@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.6-new-member-rules-warning"
+VERSION = "2.4.8-pecos-attentive-20"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -279,6 +279,30 @@ PECOS_CALLED_MESSAGES = [
     "🌵 Aquí anda Pecos, firme en el territorio.",
     "📡 Señal recibida. Pecos está en línea.",
     "😎 Dime, partner. Pecos te lee.",
+]
+
+
+PECOS_ATTENTIVE_MESSAGES = [
+    "👀 Claro, {usuario}. Pecos está pendiente de todo... alguien tiene que cuidar este pueblo. 🤠",
+    "🤠 Así es, partner {usuario}. Mientras ustedes conversan, Pecos tiene el radar encendido.",
+    "🌵 Pecos está pendiente de todo, {usuario}. Hasta los cactus están bajo vigilancia. 😎",
+    "📡 Confirmado, {usuario}. Radar de Pecos activo desde los United States.",
+    "🦅 Pecos ve desde lejos, {usuario}. Aquí cuesta que algo pase desapercibido.",
+    "⭐ Sheriff Pecos de turno, {usuario}. Nada grave se mueve por el pueblo sin que levante una ceja.",
+    "😂 {usuario}, alguien tiene que estar atento... y por lo visto me tocó a mí.",
+    "👀 Pendiente de todo, {usuario}. Pecos no parpadea... ventajas de ser bot. 🤠",
+    "🤨 {usuario}, Pecos no dice que lo vea todo... pero casi todo termina pasando por su radar.",
+    "🚨 Atención, {usuario}: Pecos confirma que sigue despierto, vigilando y ligeramente desconfiado.",
+    "🎯 Así es, {usuario}. Pecos tiene un ojo en el chat y el otro buscando problemas antes de que aparezcan.",
+    "🛂 {usuario}, control fronterizo de Pecos activo. Aquí hasta los mensajes hacen fila para entrar.",
+    "🚂 Pecos sigue la vía completa, {usuario}. Si algo raro pasa por aquí, tarde o temprano lo ve.",
+    "🕵️ {usuario}, oficialmente Pecos no espía... digamos que observa con muchísimo entusiasmo. 😎",
+    "🎬 {usuario}, Pecos está pendiente incluso de las escenas que todavía no empiezan.",
+    "🔔 Ding ding, {usuario}. Pecos confirma: vigilancia activa y sombrero bien puesto.",
+    "🤖 {usuario}, sistema Pecos operativo: ojos abiertos, radar encendido y humor disponible.",
+    "🦅 Desde arriba todo se ve mejor, {usuario}. Pecos mantiene el territorio bajo control.",
+    "🌵 {usuario}, por aquí hasta un cactus moviéndose raro llama la atención de Pecos.",
+    "😎 Correcto, {usuario}. Pecos está pendiente de todo... y de lo que parece que no importa también.",
 ]
 
 PECOS_OPINION_MESSAGES = [
@@ -2790,6 +2814,23 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
     ):
         await message.reply_text(
             choose_random("pecos_opinion", PECOS_OPINION_MESSAGES, usuario)
+        )
+        return True
+
+    if (
+        "pecos esta pendiente" in normalized
+        or "peco esta pendiente" in normalized
+        or "pecos siempre esta pendiente" in normalized
+        or "peco siempre esta pendiente" in normalized
+        or "pecos esta atento" in normalized
+        or "peco esta atento" in normalized
+        or "pecos siempre atento" in normalized
+        or "peco siempre atento" in normalized
+        or "pecos no se le escapa" in normalized
+        or "a pecos no se le escapa" in normalized
+    ):
+        await message.reply_text(
+            choose_random("pecos_attentive", PECOS_ATTENTIVE_MESSAGES, usuario)
         )
         return True
 
