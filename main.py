@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.5.0-phase1-personality"
+VERSION = "2.5.1-contextual-replies-fix"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -1269,6 +1269,7 @@ def remember_helpful_contribution(message: Message) -> None:
 
 
 def contextual_slot_available(chat_id: int, slot: str) -> bool:
+    """Comprueba cooldown sin consumirlo."""
     now = time.monotonic()
 
     expired = [
@@ -1280,11 +1281,11 @@ def contextual_slot_available(chat_id: int, slot: str) -> bool:
 
     key = (chat_id, slot)
     previous = RECENT_CONTEXTUAL_RESPONSES.get(key)
-    if previous is not None and now - previous <= CONTEXTUAL_RESPONSE_COOLDOWN_SECONDS:
-        return False
+    return previous is None or now - previous > CONTEXTUAL_RESPONSE_COOLDOWN_SECONDS
 
-    RECENT_CONTEXTUAL_RESPONSES[key] = now
-    return True
+
+def mark_contextual_response(chat_id: int, slot: str) -> None:
+    RECENT_CONTEXTUAL_RESPONSES[(chat_id, slot)] = time.monotonic()
 
 
 def repeat_warning_text(kind: str, count: int) -> str:
@@ -3260,6 +3261,14 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
 
 async def handle_contextual_phrase(message: Message) -> bool:
+    """
+    Respuestas contextuales de Fase 1.
+
+    Las señales fuertes responden siempre la primera vez dentro del cooldown.
+    El cooldown se aplica por tipo concreto de frase, de modo que probar
+    "me rindo" y luego "no funciona" produce dos respuestas distintas,
+    pero repetir la misma idea muchas veces seguidas no hace spam.
+    """
     text_value = message.text or message.caption or ""
     if not text_value:
         return False
@@ -3268,50 +3277,49 @@ async def handle_contextual_phrase(message: Message) -> bool:
     if len(normalized) < 4:
         return False
 
-    frustration_signal = (
+    slot = None
+    choices = None
+
+    if "me rindo" in normalized or "ya me rindo" in normalized:
+        slot = "frustration_giveup"
+        choices = CONTEXTUAL_FRUSTRATION_MESSAGES
+    elif (
         "no funciona" in normalized
         or "no sirve" in normalized
-        or "me rindo" in normalized
-        or "ya me rindo" in normalized
-        or "que desastre" in normalized
         or "no hay caso" in normalized
         or "sigue igual" in normalized
-    )
-
-    success_signal = (
+        or "que desastre" in normalized
+    ):
+        slot = "frustration_failure"
+        choices = CONTEXTUAL_FRUSTRATION_MESSAGES
+    elif (
         "solucionado" in normalized
         or "resuelto" in normalized
         or "ya funciono" in normalized
-        or "ya funcionó" in normalized
         or "era eso" in normalized
         or "listo quedo" in normalized
-        or "listo quedó" in normalized
         or "arreglado" in normalized
-    )
-
-    thanks_signal = (
+    ):
+        slot = "success"
+        choices = CONTEXTUAL_SUCCESS_MESSAGES
+    elif (
         "gracias pecos" in normalized
         or "gracias grupo" in normalized
-        or normalized.strip() == "gracias"
+        or normalized == "gracias"
         or "muchas gracias" in normalized
-    )
+    ):
+        slot = "thanks"
+        choices = CONTEXTUAL_THANKS_MESSAGES
 
-    if frustration_signal and contextual_slot_available(message.chat_id, "frustration"):
-        if random.randint(1, 100) <= 55:
-            await message.reply_text(random.choice(CONTEXTUAL_FRUSTRATION_MESSAGES))
-            return True
+    if not slot or not choices:
+        return False
 
-    if success_signal and contextual_slot_available(message.chat_id, "success"):
-        if random.randint(1, 100) <= 65:
-            await message.reply_text(random.choice(CONTEXTUAL_SUCCESS_MESSAGES))
-            return True
+    if not contextual_slot_available(message.chat_id, slot):
+        return False
 
-    if thanks_signal and contextual_slot_available(message.chat_id, "thanks"):
-        if random.randint(1, 100) <= 35:
-            await message.reply_text(random.choice(CONTEXTUAL_THANKS_MESSAGES))
-            return True
-
-    return False
+    mark_contextual_response(message.chat_id, slot)
+    await message.reply_text(random.choice(choices))
+    return True
 
 
 async def maybe_react_to_message(
