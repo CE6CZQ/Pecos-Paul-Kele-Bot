@@ -6,8 +6,11 @@ set -eu
 : "${TELEGRAM_API_HASH:?Falta TELEGRAM_API_HASH}"
 
 ROOT_DATA="${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
-TELEGRAM_DATA="${ROOT_DATA}/telegram-bot-api"
-TELEGRAM_TEMP="/tmp/telegram-bot-api"
+
+# Solo la base de datos de Pecos debe ser persistente.
+# Los archivos de Telegram son temporales.
+TELEGRAM_DATA="/tmp/telegram-bot-api-data"
+TELEGRAM_TEMP="/tmp/telegram-bot-api-temp"
 
 mkdir -p "${ROOT_DATA}" "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
 chown -R telegram-bot-api:telegram-bot-api "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
