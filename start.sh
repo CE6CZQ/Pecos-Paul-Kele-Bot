@@ -15,6 +15,47 @@ chown -R telegram-bot-api:telegram-bot-api "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
 export LOCAL_BOT_API=1
 export LOCAL_BOT_API_URL="http://127.0.0.1:8081"
 
+TELEGRAM_PID=""
+PECOS_PID=""
+
+start_telegram_api() {
+    echo "[BOT API] Iniciando servidor local..."
+
+    telegram-bot-api \
+        --api-id="${TELEGRAM_API_ID}" \
+        --api-hash="${TELEGRAM_API_HASH}" \
+        --local \
+        --http-ip-address=127.0.0.1 \
+        --http-port=8081 \
+        --dir="${TELEGRAM_DATA}" \
+        --temp-dir="${TELEGRAM_TEMP}" \
+        --username=telegram-bot-api \
+        --groupname=telegram-bot-api \
+        --verbosity=0 \
+        --memory-verbosity=0 &
+
+    TELEGRAM_PID=$!
+}
+
+wait_for_telegram_api() {
+    python3 - <<'PY'
+import socket
+import sys
+import time
+
+for _ in range(120):
+    try:
+        with socket.create_connection(("127.0.0.1", 8081), timeout=1):
+            print("[BOT API] Servidor local listo.")
+            sys.exit(0)
+    except OSError:
+        time.sleep(0.5)
+
+print("[BOT API] ERROR: no inició en el tiempo esperado.")
+sys.exit(1)
+PY
+}
+
 cleanup() {
     echo "Deteniendo Pecos y Telegram Bot API..."
 
@@ -37,54 +78,24 @@ echo "=============================================="
 echo "Datos persistentes: ${ROOT_DATA}"
 echo "Telegram Bot API:   ${TELEGRAM_DATA}"
 
-echo "Iniciando Telegram Bot API local..."
+start_telegram_api
+wait_for_telegram_api
 
-telegram-bot-api \
-    --api-id="${TELEGRAM_API_ID}" \
-    --api-hash="${TELEGRAM_API_HASH}" \
-    --local \
-    --http-ip-address=127.0.0.1 \
-    --http-port=8081 \
-    --dir="${TELEGRAM_DATA}" \
-    --temp-dir="${TELEGRAM_TEMP}" \
-    --username=telegram-bot-api \
-    --groupname=telegram-bot-api &
-
-TELEGRAM_PID=$!
-
-echo "Esperando a que Telegram Bot API escuche en 127.0.0.1:8081..."
-
-python3 - <<'PY'
-import socket
-import sys
-import time
-
-for _ in range(120):
-    try:
-        with socket.create_connection(("127.0.0.1", 8081), timeout=1):
-            print("Telegram Bot API disponible.")
-            sys.exit(0)
-    except OSError:
-        time.sleep(0.5)
-
-print("ERROR: Telegram Bot API no inició en el tiempo esperado.")
-sys.exit(1)
-PY
-
-echo "Iniciando Pecos..."
+echo "[PECOS] Iniciando main.py..."
 python3 -u /app/main.py &
 PECOS_PID=$!
 
 while true; do
-    if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
-        echo "ERROR: Telegram Bot API se detuvo."
-        exit 1
-    fi
-
     if ! kill -0 "${PECOS_PID}" 2>/dev/null; then
-        echo "ERROR: Pecos se detuvo."
+        echo "ERROR: Pecos se detuvo. Railway reiniciará el contenedor."
         exit 1
     fi
 
-    sleep 5
+    if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
+        echo "[BOT API] El proceso se detuvo. Reiniciando sin tumbar Pecos..."
+        start_telegram_api
+        wait_for_telegram_api
+    fi
+
+    sleep 2
 done
