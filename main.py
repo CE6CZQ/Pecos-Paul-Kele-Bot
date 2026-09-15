@@ -55,7 +55,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.1.0-multiadmin"
+VERSION = "1.2.0-bulkterms"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -494,16 +494,43 @@ def find_blocked_term(text: str) -> str | None:
 
 
 def split_input_lines(text: str) -> list[str]:
+    """
+    Acepta múltiples palabras/frases en un solo mensaje.
+
+    Separadores admitidos:
+    - coma: palabra1, palabra2, frase completa
+    - punto y coma: palabra1; palabra2; frase completa
+    - salto de línea: una por línea
+
+    También limpia prefijos comunes de listas como:
+    1. palabra
+    2) frase
+    - palabra
+    • frase
+    """
     values = []
     seen = set()
-    for line in (text or "").replace("\r", "\n").split("\n"):
-        value = line.strip()
+
+    raw = (text or "").replace("\r", "\n")
+
+    # Permitir coma, punto y coma o salto de línea.
+    parts = re.split(r"[,;\n]+", raw)
+
+    for part in parts:
+        value = part.strip()
+
+        # Quitar numeración o viñetas al pegar listas.
+        value = re.sub(r"^\s*(?:[-*•]+|\d+[.)-])\s*", "", value).strip()
+
         if not value:
             continue
+
         key = value.casefold()
+
         if key not in seen:
             values.append(value)
             seen.add(key)
+
     return values
 
 
@@ -835,11 +862,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "words:add":
         PENDING_ADMIN_ACTION[user_id] = "words:add"
         await query.message.reply_text(
-            "➕ Envíame las palabras o frases que quieras agregar.\n\n"
-            "Puedes enviar varias, una por línea.\n\n"
+            "➕ Envíame todas las palabras o frases que quieras agregar en un solo mensaje.\n\n"
+            "Puedes separarlas por:\n"
+            "• comas\n"
+            "• punto y coma\n"
+            "• una por línea\n\n"
             "Ejemplo:\n"
-            "palabra uno\n"
-            "frase restringida\n\n"
+            "lool, palabra dos, frase restringida, otra frase\n\n"
+            "También puedes pegar una lista completa.\n\n"
             "Usa /cancel para cancelar."
         )
         return
@@ -847,8 +877,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "words:remove":
         PENDING_ADMIN_ACTION[user_id] = "words:remove"
         await query.message.reply_text(
-            "➖ Envíame exactamente las palabras o frases que quieras eliminar.\n\n"
-            "Puedes enviar varias, una por línea.\n\n"
+            "➖ Envíame todas las palabras o frases que quieras eliminar en un solo mensaje.\n\n"
+            "Puedes separarlas por comas, punto y coma o una por línea.\n\n"
+            "Ejemplo:\n"
+            "lool, palabra dos, frase restringida\n\n"
             "Usa /cancel para cancelar."
         )
         return
