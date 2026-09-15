@@ -1,116 +1,90 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-echo "=============================================="
-echo " Pecos Paul Kele - Railway Local Bot API"
-echo "=============================================="
+#!/bin/sh
+set -eu
 
 : "${BOT_TOKEN:?Falta BOT_TOKEN}"
 : "${TELEGRAM_API_ID:?Falta TELEGRAM_API_ID}"
 : "${TELEGRAM_API_HASH:?Falta TELEGRAM_API_HASH}"
 
-DATA_ROOT="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"
-STATE_DIR="${TELEGRAM_STATE_DIR:-${DATA_ROOT}/telegram-bot-api-state}"
-FILES_DIR="${TELEGRAM_FILES_DIR:-/tmp/telegram-bot-api-files}"
-TEMP_DIR="${TELEGRAM_TEMP_DIR:-/tmp/telegram-bot-api-temp}"
-HTTP_PORT="${TELEGRAM_HTTP_PORT:-8081}"
-MIGRATION_MARKER="${DATA_ROOT}/.pecos_local_bot_api_migrated"
+ROOT_DATA="${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
+TELEGRAM_DATA="${ROOT_DATA}/telegram-bot-api"
+TELEGRAM_TEMP="/tmp/telegram-bot-api"
 
-mkdir -p "${DATA_ROOT}" "${STATE_DIR}" "${FILES_DIR}" "${TEMP_DIR}"
+mkdir -p "${ROOT_DATA}" "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
+chown -R telegram-bot-api:telegram-bot-api "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
 
-# El binario de la imagen aiogram conoce el usuario/grupo 101.
-chown -R 101:101 "${STATE_DIR}" "${FILES_DIR}" "${TEMP_DIR}" || true
+export LOCAL_BOT_API=1
+export LOCAL_BOT_API_URL="http://127.0.0.1:8081"
 
-# ------------------------------------------------------------------
-# MIGRACIÓN CONTROLADA:
-# Solo llama a logOut del servidor oficial una vez, cuando el usuario
-# haya definido MIGRATE_FROM_CLOUD=1 en Railway.
-# El marker persiste en /data y evita repetir el logOut.
-# ------------------------------------------------------------------
-if [[ "${MIGRATE_FROM_CLOUD:-0}" == "1" && ! -f "${MIGRATION_MARKER}" ]]; then
-    echo "[MIGRACION] Desregistrando Pecos de api.telegram.org..."
+cleanup() {
+    echo "Deteniendo Pecos y Telegram Bot API..."
 
-    LOGOUT_RESPONSE="$(
-        curl -sS \
-            --connect-timeout 10 \
-            --max-time 30 \
-            "https://api.telegram.org/bot${BOT_TOKEN}/logOut"
-    )"
-
-    if echo "${LOGOUT_RESPONSE}" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
-        touch "${MIGRATION_MARKER}"
-        echo "[MIGRACION] logOut confirmado. Marker persistente creado."
-    else
-        echo "[MIGRACION] ERROR: Telegram no confirmó logOut."
-        echo "${LOGOUT_RESPONSE}"
-        exit 1
+    if [ -n "${PECOS_PID:-}" ]; then
+        kill "${PECOS_PID}" 2>/dev/null || true
     fi
-fi
 
-echo "[BOT API] Estado persistente: ${STATE_DIR}"
-echo "[BOT API] Archivos descargados (efimeros): ${FILES_DIR}"
-echo "[BOT API] Puerto local: ${HTTP_PORT}"
+    if [ -n "${TELEGRAM_PID:-}" ]; then
+        kill "${TELEGRAM_PID}" 2>/dev/null || true
+    fi
 
-# Estado/sesión persistente en /data.
-# Archivos grandes en /tmp para NO consumir el volumen persistente.
+    wait 2>/dev/null || true
+}
+
+trap cleanup INT TERM EXIT
+
+echo "=============================================="
+echo " Pecos Paul Kele - arquitectura unificada"
+echo "=============================================="
+echo "Datos persistentes: ${ROOT_DATA}"
+echo "Telegram Bot API:   ${TELEGRAM_DATA}"
+
+echo "Iniciando Telegram Bot API local..."
+
 telegram-bot-api \
+    --api-id="${TELEGRAM_API_ID}" \
+    --api-hash="${TELEGRAM_API_HASH}" \
     --local \
-    --dir="${STATE_DIR}" \
-    --files-dir="${FILES_DIR}" \
-    --temp-dir="${TEMP_DIR}" \
-    --http-port="${HTTP_PORT}" \
+    --http-ip-address=127.0.0.1 \
+    --http-port=8081 \
+    --dir="${TELEGRAM_DATA}" \
+    --temp-dir="${TELEGRAM_TEMP}" \
     --username=telegram-bot-api \
     --groupname=telegram-bot-api &
 
-BOT_API_PID=$!
+TELEGRAM_PID=$!
 
-cleanup() {
-    echo "[SHUTDOWN] Deteniendo procesos..."
-    if kill -0 "${BOT_API_PID}" 2>/dev/null; then
-        kill "${BOT_API_PID}" 2>/dev/null || true
-        wait "${BOT_API_PID}" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
+echo "Esperando a que Telegram Bot API escuche en 127.0.0.1:8081..."
 
-echo "[BOT API] Esperando a que el servidor HTTP responda..."
+python3 - <<'PY'
+import socket
+import sys
+import time
 
-READY=0
-for _ in $(seq 1 60); do
-    if curl -sS \
-        --connect-timeout 1 \
-        --max-time 2 \
-        -o /dev/null \
-        "http://127.0.0.1:${HTTP_PORT}/"; then
-        READY=1
-        break
-    fi
+for _ in range(120):
+    try:
+        with socket.create_connection(("127.0.0.1", 8081), timeout=1):
+            print("Telegram Bot API disponible.")
+            sys.exit(0)
+    except OSError:
+        time.sleep(0.5)
 
-    if ! kill -0 "${BOT_API_PID}" 2>/dev/null; then
-        echo "[BOT API] ERROR: el proceso terminó durante el arranque."
-        wait "${BOT_API_PID}" || true
+print("ERROR: Telegram Bot API no inició en el tiempo esperado.")
+sys.exit(1)
+PY
+
+echo "Iniciando Pecos..."
+python3 -u /app/main.py &
+PECOS_PID=$!
+
+while true; do
+    if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
+        echo "ERROR: Telegram Bot API se detuvo."
         exit 1
     fi
 
-    sleep 1
+    if ! kill -0 "${PECOS_PID}" 2>/dev/null; then
+        echo "ERROR: Pecos se detuvo."
+        exit 1
+    fi
+
+    sleep 5
 done
-
-if [[ "${READY}" != "1" ]]; then
-    echo "[BOT API] ERROR: no respondió en 60 segundos."
-    exit 1
-fi
-
-echo "[BOT API] Servidor local listo."
-echo "[PECOS] Iniciando main.py..."
-
-python /app/main.py &
-PECOS_PID=$!
-
-# Si Pecos termina, detenemos el Bot API Server y devolvemos su código.
-set +e
-wait "${PECOS_PID}"
-PECOS_STATUS=$?
-set -e
-
-echo "[PECOS] main.py terminó con código ${PECOS_STATUS}."
-exit "${PECOS_STATUS}"
