@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+from difflib import SequenceMatcher
 import logging
 import os
 import random
@@ -59,7 +60,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.5.1-contextual-replies-fix"
+VERSION = "2.6.0-phase2-reputation-repeat-questions"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -189,6 +190,58 @@ KNOWN_HELPFUL_KEYWORDS = (
 )
 
 ARCHIVE_EXTENSIONS = (".rar", ".zip", ".7z")
+
+
+# Fase 2: preguntas repetidas + reconocimiento interno de aportes.
+QUESTION_LOOKBACK_DAYS = 120
+QUESTION_HISTORY_LIMIT = 500
+QUESTION_SIMILARITY_THRESHOLD = 0.72
+QUESTION_ALERT_COOLDOWN_SECONDS = 240
+RECENT_REPEAT_QUESTION_ALERTS: dict[tuple[int, int], float] = {}
+
+QUESTION_STOPWORDS = {
+    "a", "al", "algo", "alguien", "alguno", "alguna", "ante", "como", "con",
+    "cual", "cuales", "cuando", "de", "del", "donde", "el", "ella", "en", "es",
+    "esa", "ese", "esta", "este", "esto", "hay", "la", "las", "lo", "los", "me",
+    "mi", "para", "pero", "por", "porque", "puede", "pueden", "que", "quien",
+    "se", "si", "sin", "su", "sus", "tengo", "tiene", "tienen", "un", "una",
+    "uno", "unos", "unas", "y", "ya", "yo", "favor", "sabe", "saben", "ayuda",
+    "necesito", "busco", "consulta", "pregunta",
+}
+
+REPUTATION_MILESTONES = (3, 7, 12, 20)
+
+REPUTATION_MESSAGES = {
+    3: [
+        "⭐ Pecos toma nota: {usuario} ya ha dejado varias ayudas útiles por este pueblo. Se agradece, partner.",
+        "🤠 Pecos reconoce a {usuario}: ya van varias contribuciones útiles. Buen vecino del territorio.",
+        "🌵 {usuario} viene aportando más que cactus al paisaje. Pecos lo tiene presente.",
+    ],
+    7: [
+        "🦅 Pecos lleva la cuenta sin hacer rankings: {usuario} se está convirtiendo en una referencia útil del grupo.",
+        "⭐ Sheriff Pecos hace un gesto con el sombrero a {usuario}. Varias ayudas útiles ya llevan su firma.",
+        "🤠 {usuario}, Pecos no reparte medallas por cualquier cosa. Pero tus aportes ya se hacen notar por aquí.",
+    ],
+    12: [
+        "🌵 Pecos confirma algo que el pueblo ya sospechaba: {usuario} suele aparecer cuando hace falta una mano.",
+        "🦅 Respeto de sheriff para {usuario}. Pecos recuerda quién ayuda cuando el camino se pone complicado.",
+        "⭐ {usuario} ya tiene historial de aportes útiles. Pecos no olvida esas cosas.",
+    ],
+    20: [
+        "🤠 Pecos se quita el sombrero ante {usuario}. No hay ranking, pero sí memoria: has ayudado muchas veces a este pueblo.",
+        "⭐ Reconocimiento especial del sheriff para {usuario}. A esta altura Pecos ya sabe que cuando apareces, suele venir algo útil contigo.",
+        "🦅 {usuario}, Pecos te tiene en la memoria buena del territorio. Gracias por sostener el espíritu de ayuda del grupo.",
+    ],
+}
+
+REPEATED_QUESTION_MESSAGES = [
+    "🌵 {usuario}, esa pregunta ya pasó por este saloon hace poco. Pecos encontró una conversación muy parecida.",
+    "🕵️ {usuario}, Pecos revisó sus notas: este asunto ya se habló por aquí recientemente.",
+    "🤠 Partner {usuario}, antes de volver a ensillar esa pregunta, Pecos encontró una huella casi idéntica en el historial.",
+    "📡 {usuario}, señal conocida. Pecos recuerda una consulta muy parecida en este mismo territorio.",
+    "🦅 Pecos vio esta pregunta antes, {usuario}. Te dejo la pista para que no tengamos que recorrer dos veces el mismo desierto.",
+    "⭐ Sheriff Pecos reporta coincidencia: {usuario}, este tema ya tuvo una ronda anterior en el grupo.",
+]
 
 FUN_MODERATION_MESSAGES = [
     "👀 {usuario}, Pecos estaba mirando. Ese mensaje tomó un vuelo directo fuera del chat. ✈️",
@@ -583,6 +636,31 @@ class Database:
                 pecos_mention_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(chat_id, user_id)
             );
+
+
+            CREATE TABLE IF NOT EXISTS reputation_notices (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                milestone INTEGER NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, user_id, milestone)
+            );
+
+            CREATE TABLE IF NOT EXISTS question_history (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                user_name TEXT NOT NULL DEFAULT '',
+                question_text TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                answer_message_id INTEGER NOT NULL DEFAULT 0,
+                answer_user_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(chat_id, message_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_question_history_chat_created
+                ON question_history(chat_id, created_at DESC);
             """
         )
         self.conn.commit()
@@ -1093,6 +1171,107 @@ class Database:
                 (chat_id, user_id),
             ).fetchone()
 
+    def claim_reputation_notice(self, chat_id: int, user_id: int, milestone: int) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO reputation_notices(chat_id, user_id, milestone, sent_at)
+                VALUES(?, ?, ?, ?)
+                """,
+                (chat_id, user_id, milestone, now),
+            )
+            inserted = self.conn.total_changes > before
+            self.conn.commit()
+        return inserted
+
+    def store_question(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        user_name: str,
+        question_text: str,
+        signature: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO question_history(
+                    chat_id, message_id, user_id, user_name, question_text,
+                    signature, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id, message_id, user_id, user_name[:150],
+                    question_text[:1000], signature[:500], now,
+                ),
+            )
+            # Mantener un máximo razonable por grupo.
+            self.conn.execute(
+                """
+                DELETE FROM question_history
+                WHERE chat_id = ?
+                  AND message_id NOT IN (
+                      SELECT message_id
+                      FROM question_history
+                      WHERE chat_id = ?
+                      ORDER BY message_id DESC
+                      LIMIT ?
+                  )
+                """,
+                (chat_id, chat_id, QUESTION_HISTORY_LIMIT),
+            )
+            self.conn.commit()
+
+    def recent_questions(self, chat_id: int, limit: int = 120) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT chat_id, message_id, user_id, user_name, question_text,
+                       signature, created_at, answer_message_id, answer_user_id
+                FROM question_history
+                WHERE chat_id = ?
+                  AND created_at >= datetime('now', ?)
+                ORDER BY CASE WHEN answer_message_id > 0 THEN 0 ELSE 1 END,
+                         message_id DESC
+                LIMIT ?
+                """,
+                (chat_id, f"-{QUESTION_LOOKBACK_DAYS} days", limit),
+            ).fetchall()
+
+    def get_question(self, chat_id: int, message_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT * FROM question_history
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+
+    def mark_question_answer(
+        self,
+        chat_id: int,
+        question_message_id: int,
+        answer_message_id: int,
+        answer_user_id: int,
+    ) -> bool:
+        with self.lock:
+            cur = self.conn.execute(
+                """
+                UPDATE question_history
+                SET answer_message_id = ?, answer_user_id = ?
+                WHERE chat_id = ? AND message_id = ? AND answer_message_id = 0
+                """,
+                (answer_message_id, answer_user_id, chat_id, question_message_id),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
     def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         with self.lock:
@@ -1263,9 +1442,224 @@ def looks_like_helpful_contribution(message: Message) -> bool:
     return any(keyword in normalized for keyword in KNOWN_HELPFUL_KEYWORDS)
 
 
-def remember_helpful_contribution(message: Message) -> None:
+def remember_helpful_contribution(message: Message) -> int | None:
     if looks_like_helpful_contribution(message):
-        increment_user_metric(message, "helpful_score")
+        return increment_user_metric(message, "helpful_score")
+    return None
+
+
+def question_signature(text_value: str) -> str:
+    normalized = normalize_intent(text_value)
+    normalized = re.sub(r"https?://\S+", " ", normalized)
+    normalized = re.sub(r"@\w+", " ", normalized)
+    tokens = re.findall(r"[a-z0-9][a-z0-9_+.-]*", normalized)
+    informative = [
+        token for token in tokens
+        if token not in QUESTION_STOPWORDS and len(token) >= 2
+    ]
+    return " ".join(informative[:50])
+
+
+def is_repeated_question_candidate(message: Message) -> bool:
+    text_value = (message.text or message.caption or "").strip()
+    if not text_value or len(text_value) < 8:
+        return False
+
+    normalized = normalize_intent(text_value)
+
+    # Las preguntas explícitas a Pecos siguen su flujo conversacional normal.
+    if re.search(r"\b(pecos|peco)\b", normalized):
+        return False
+
+    if not looks_like_question(text_value):
+        return False
+
+    signature = question_signature(text_value)
+    token_count = len(signature.split())
+
+    # Una consulta demasiado genérica ("¿cómo hago?") no debe disparar coincidencias.
+    return token_count >= 2
+
+
+def question_similarity(sig_a: str, sig_b: str) -> float:
+    if not sig_a or not sig_b:
+        return 0.0
+
+    if sig_a == sig_b:
+        return 1.0
+
+    a = set(sig_a.split())
+    b = set(sig_b.split())
+    if not a or not b:
+        return 0.0
+
+    shared = len(a & b)
+    if shared < 2:
+        return 0.0
+
+    jaccard = shared / len(a | b)
+    containment = shared / min(len(a), len(b))
+    sequence = SequenceMatcher(None, sig_a, sig_b).ratio()
+
+    # Si todos los términos importantes de la consulta corta aparecen en la larga,
+    # lo consideramos una señal fuerte, pero solo con 3+ términos para evitar ruido.
+    if min(len(a), len(b)) >= 3 and containment >= 0.90:
+        return max(jaccard, 0.88, sequence)
+
+    return max(jaccard, sequence * 0.92)
+
+
+def repeated_question_alert_allowed(chat_id: int, user_id: int) -> bool:
+    now = time.monotonic()
+    key = (chat_id, user_id)
+    previous = RECENT_REPEAT_QUESTION_ALERTS.get(key)
+    if previous is not None and now - previous <= QUESTION_ALERT_COOLDOWN_SECONDS:
+        return False
+
+    RECENT_REPEAT_QUESTION_ALERTS[key] = now
+
+    expired = [
+        item for item, ts in RECENT_REPEAT_QUESTION_ALERTS.items()
+        if now - ts > QUESTION_ALERT_COOLDOWN_SECONDS + 60
+    ]
+    for item in expired:
+        RECENT_REPEAT_QUESTION_ALERTS.pop(item, None)
+
+    return True
+
+
+async def maybe_send_reputation_notice(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    score: int | None,
+) -> bool:
+    user = message.from_user
+    if not user or user.is_bot or not score:
+        return False
+
+    milestone = None
+    for value in REPUTATION_MILESTONES:
+        if score >= value:
+            milestone = value
+
+    if milestone is None:
+        return False
+
+    if not db.claim_reputation_notice(message.chat_id, user.id, milestone):
+        return False
+
+    usuario = display_name(message)
+    template = random.choice(REPUTATION_MESSAGES[milestone])
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        text=template.replace("{usuario}", usuario),
+    )
+    db.add_history(
+        f"RECONOCIMIENTO PECOS | {usuario} | hito interno {milestone} | chat {message.chat_id}"
+    )
+    return True
+
+
+async def capture_answer_to_known_question(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    reply = message.reply_to_message
+    user = message.from_user
+    if not reply or not user or user.is_bot:
+        return False
+
+    question = db.get_question(message.chat_id, reply.message_id)
+    if not question:
+        return False
+
+    # No cuenta como ayuda responderse a sí mismo.
+    if int(question["user_id"] or 0) == user.id:
+        return False
+
+    text_value = (message.text or message.caption or "").strip()
+    has_useful_media = bool(message.document or message.photo or message.video)
+    if not has_useful_media and len(text_value) < 12:
+        return False
+
+    if not db.mark_question_answer(
+        message.chat_id,
+        reply.message_id,
+        message.message_id,
+        user.id,
+    ):
+        return False
+
+    score = increment_user_metric(message, "helpful_score", 2)
+    await maybe_send_reputation_notice(message, context, score)
+    db.add_history(
+        f"AYUDA DETECTADA | {display_name(message)} respondió pregunta {reply.message_id} "
+        f"en chat {message.chat_id}."
+    )
+    return True
+
+
+async def handle_repeated_question(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not is_repeated_question_candidate(message):
+        return False
+
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    current_text = (message.text or message.caption or "").strip()
+    current_signature = question_signature(current_text)
+
+    best = None
+    best_score = 0.0
+    for row in db.recent_questions(message.chat_id):
+        if int(row["message_id"]) == message.message_id:
+            continue
+
+        score = question_similarity(current_signature, str(row["signature"] or ""))
+        if score > best_score:
+            best = row
+            best_score = score
+
+    # Siempre guardamos la pregunta nueva para que Pecos aprenda el historial futuro.
+    db.store_question(
+        message.chat_id,
+        message.message_id,
+        user.id,
+        display_name(message),
+        current_text,
+        current_signature,
+    )
+
+    if best is None or best_score < QUESTION_SIMILARITY_THRESHOLD:
+        return False
+
+    if not repeated_question_alert_allowed(message.chat_id, user.id):
+        return False
+
+    previous_link = build_message_link(message.chat, int(best["message_id"]))
+    answer_id = int(best["answer_message_id"] or 0)
+    answer_link = build_message_link(message.chat, answer_id) if answer_id else None
+
+    response = random.choice(REPEATED_QUESTION_MESSAGES).replace(
+        "{usuario}", display_name(message)
+    )
+
+    if previous_link:
+        response += f"\n\n🔎 Conversación anterior: {previous_link}"
+
+    if answer_link:
+        response += f"\n💬 Respuesta relacionada: {answer_link}"
+
+    await context.bot.send_message(chat_id=message.chat_id, text=response)
+    db.add_history(
+        f"PREGUNTA REPETIDA | {display_name(message)} | similitud={best_score:.2f} | "
+        f"actual={message.message_id} anterior={best['message_id']}"
+    )
+    return True
 
 
 def contextual_slot_available(chat_id: int, slot: str) -> bool:
@@ -1542,7 +1936,7 @@ async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• elimina el mensaje restringido y responde con humor\n"
         "• saluda y se despide\n"
         "• puede enviar mensajes diarios\n"
-        "• encuestas, recuerdos, humor, bromas internas y reacciones\n• memoria básica de usuarios, avisos contextuales y detector de silencio con personalidad\n"
+        "• encuestas, recuerdos, humor, bromas internas y reacciones\n• memoria básica de usuarios, avisos contextuales y detector de silencio con personalidad\n• reconocimiento de aportes y detector de preguntas repetidas\n"
         "• administración privada mediante botones"
     )
 
@@ -3490,20 +3884,40 @@ async def handle_social(message: Message) -> bool:
         await message.reply_text(choose_random("farewell", FAREWELLS, usuario))
         return True
 
+    helpful_score = 0
+    if message.from_user:
+        helpful_score = get_user_metric(message.chat_id, message.from_user.id, "helpful_score")
+
     if "buenos dias" in normalized or "buen dia" in normalized:
-        await message.reply_text(choose_random("morning", MORNING_GREETINGS, usuario))
+        increment_user_metric(message, "greeting_count")
+        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+            await message.reply_text(choose_random("veteran_morning", VETERAN_GREETINGS, usuario))
+        else:
+            await message.reply_text(choose_random("morning", MORNING_GREETINGS, usuario))
         return True
 
     if "buenas tardes" in normalized:
-        await message.reply_text(choose_random("afternoon", AFTERNOON_GREETINGS, usuario))
+        increment_user_metric(message, "greeting_count")
+        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+            await message.reply_text(choose_random("veteran_afternoon", VETERAN_GREETINGS, usuario))
+        else:
+            await message.reply_text(choose_random("afternoon", AFTERNOON_GREETINGS, usuario))
         return True
 
     if "buenas noches" in normalized:
-        await message.reply_text(choose_random("night", NIGHT_GREETINGS, usuario))
+        increment_user_metric(message, "greeting_count")
+        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+            await message.reply_text(choose_random("veteran_night", VETERAN_GREETINGS, usuario))
+        else:
+            await message.reply_text(choose_random("night", NIGHT_GREETINGS, usuario))
         return True
 
     if re.search(r"\b(hola|hello|hey|holi|saludos|buenas)\b", normalized):
-        await message.reply_text(choose_random("general", GENERAL_GREETINGS, usuario))
+        increment_user_metric(message, "greeting_count")
+        if helpful_score >= 3 and random.randint(1, 100) <= 50:
+            await message.reply_text(choose_random("veteran_general", VETERAN_GREETINGS, usuario))
+        else:
+            await message.reply_text(choose_random("general", GENERAL_GREETINGS, usuario))
         return True
 
     return False
@@ -3561,7 +3975,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         not is_edited
         and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     ):
-        remember_helpful_contribution(message)
+        helpful_score = remember_helpful_contribution(message)
+        await maybe_send_reputation_notice(message, context, helpful_score)
 
     # Moderación tiene prioridad sobre saludos/respuestas.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -3571,6 +3986,16 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Usuario recién ingresado que pregunta antes de revisar reglas/archivos.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_new_member_question(message, context):
+            return
+
+    # Fase 2: aprende respuestas explícitas a preguntas ya registradas y
+    # reconoce consultas muy parecidas sin borrar el mensaje del usuario.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        await capture_answer_to_known_question(message, context)
+        if await handle_repeated_question(message, context):
             return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
