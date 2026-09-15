@@ -58,7 +58,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.2.1-resilient-large-files"
+VERSION = "2.2.2-pecos-presence-read"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -227,10 +227,10 @@ NIGHT_GREETINGS = [
 
 PECOS_CALLED_MESSAGES = [
     "🤠 Aquí estoy. ¿Me llamaban?",
-    "👀 Pecos presente. Te escucho.",
+    "👀 Pecos presente. Te leo.",
     "🌵 Aquí anda Pecos, firme en el territorio.",
     "📡 Señal recibida. Pecos está en línea.",
-    "😎 Dime, partner. Pecos escucha.",
+    "😎 Dime, partner. Pecos te lee.",
 ]
 
 PECOS_OPINION_MESSAGES = [
@@ -2496,6 +2496,7 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     if (
         "estas ahi" in normalized
+        or "estas aqui" in normalized
         or "andas por ahi" in normalized
         or "me escuchas" in normalized
         or normalized in {"pecos", "peco", "oye pecos", "oye peco"}
