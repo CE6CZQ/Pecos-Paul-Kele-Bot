@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import hashlib
 from difflib import SequenceMatcher
 import logging
@@ -60,7 +61,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.6.0-phase2-reputation-repeat-questions"
+VERSION = "2.7.0-phase3-smart-archive"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -190,6 +191,28 @@ KNOWN_HELPFUL_KEYWORDS = (
 )
 
 ARCHIVE_EXTENSIONS = (".rar", ".zip", ".7z")
+
+# Fase 3: archivo inteligente.
+ARCHIVE_SEARCH_MAX_RESULTS = 6
+ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
+ARCHIVE_DETECTIVE_SIMILARITY = 0.72
+RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
+
+ARCHIVE_SEARCH_STOPWORDS = {
+    "pecos", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
+    "encuentra", "encuentrame", "tenemos", "tienes", "tienen", "hay", "algo",
+    "archivo", "archivos", "para", "por", "favor", "favor", "del", "de", "la",
+    "el", "los", "las", "un", "una", "unos", "unas", "que", "qué", "quiero",
+    "necesito", "necesitamos", "sobre", "relacionado", "relacionados", "software",
+    "programa", "programas", "algun", "alguno", "alguna", "algunos", "algunas",
+    "me", "puedes", "puede", "podrias", "podría", "ver", "si", "existe",
+}
+
+TECHNICAL_ARCHIVE_WORDS = {
+    "cps", "dmr", "firmware", "codeplug", "hytera", "motorola", "kenwood",
+    "icom", "baofeng", "anytone", "vertex", "yaesu", "radioddity", "retevis",
+    "programming", "programacion", "driver", "drivers",
+}
 
 
 # Fase 2: preguntas repetidas + reconocimiento interno de aportes.
@@ -661,6 +684,16 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_question_history_chat_created
                 ON question_history(chat_id, created_at DESC);
+
+
+            CREATE TABLE IF NOT EXISTS archive_detective_notices (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                notice_type TEXT NOT NULL,
+                related_message_id INTEGER NOT NULL DEFAULT 0,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id, notice_type)
+            );
             """
         )
         self.conn.commit()
@@ -1272,6 +1305,56 @@ class Database:
             self.conn.commit()
         return cur.rowcount > 0
 
+    def list_archive_fingerprints(self, chat_id: int, limit: int = 5000) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT chat_id, sha256, message_id, file_unique_id, file_name,
+                       file_size, sender_id, sender_name, first_seen
+                FROM file_fingerprints
+                WHERE chat_id = ? AND file_name <> ''
+                ORDER BY message_id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+
+    def fingerprint_by_message(self, chat_id: int, message_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT chat_id, sha256, message_id, file_unique_id, file_name,
+                       file_size, sender_id, sender_name, first_seen
+                FROM file_fingerprints
+                WHERE chat_id = ? AND message_id = ?
+                LIMIT 1
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+
+    def claim_archive_detective_notice(
+        self,
+        chat_id: int,
+        message_id: int,
+        notice_type: str,
+        related_message_id: int = 0,
+    ) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO archive_detective_notices(
+                    chat_id, message_id, notice_type, related_message_id, sent_at
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (chat_id, message_id, notice_type[:40], related_message_id, now),
+            )
+            inserted = self.conn.total_changes > before
+            self.conn.commit()
+        return inserted
+
     def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         with self.lock:
@@ -1696,6 +1779,420 @@ def repeat_warning_text(kind: str, count: int) -> str:
     return ""
 
 
+def archive_file_allowed(file_name: str) -> bool:
+    lower = (file_name or "").casefold().strip()
+    return any(lower.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
+
+
+def archive_normalized_name(value: str) -> str:
+    normalized = normalize_intent(value or "")
+    normalized = re.sub(r"\.(rar|zip|7z)$", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def archive_stem_for_similarity(file_name: str) -> str:
+    stem = archive_normalized_name(file_name)
+    # Neutraliza versiones explícitas, pero conserva números de modelo unidos a letras.
+    stem = re.sub(r"\bv?\d+(?:[._-]\d+)+\b", " version ", stem)
+    stem = re.sub(r"\b(?:ver|version)\s*\d+(?:\s*\d+)*\b", " version ", stem)
+    return re.sub(r"\s+", " ", stem).strip()
+
+
+def extract_archive_terms(text_value: str) -> list[str]:
+    normalized = normalize_intent(text_value or "")
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9._+-]*", normalized)
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for token in raw_tokens:
+        token = token.strip("._+-")
+        if not token or token in ARCHIVE_SEARCH_STOPWORDS:
+            continue
+        if token in {"rar", "zip", "7z"}:
+            continue
+        if len(token) < 3 and not any(ch.isdigit() for ch in token):
+            continue
+        if token not in seen:
+            seen.add(token)
+            result.append(token)
+
+    return result[:6]
+
+
+def archive_search_score(file_name: str, terms: list[str]) -> float:
+    if not terms:
+        return 0.0
+
+    normalized_name = archive_normalized_name(file_name)
+    name_tokens = set(normalized_name.split())
+    score = 0.0
+    matched = 0
+
+    for term in terms:
+        normalized_term = archive_normalized_name(term)
+        if not normalized_term:
+            continue
+
+        if normalized_term in name_tokens:
+            score += 4.0
+            matched += 1
+        elif normalized_term in normalized_name:
+            score += 2.5
+            matched += 1
+        else:
+            # Aproximación leve para modelos escritos con separadores distintos.
+            compact_name = normalized_name.replace(" ", "")
+            compact_term = normalized_term.replace(" ", "")
+            if compact_term and compact_term in compact_name:
+                score += 2.0
+                matched += 1
+
+    if matched == len(terms):
+        score += 3.0
+    elif matched == 0:
+        return 0.0
+
+    # Favorece coincidencias más específicas.
+    score += min(2.0, sum(len(t) for t in terms) / 20.0)
+    return score
+
+
+def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MAX_RESULTS) -> list[sqlite3.Row]:
+    terms = extract_archive_terms(query)
+    if not terms:
+        return []
+
+    ranked: list[tuple[float, sqlite3.Row]] = []
+    for row in db.list_archive_fingerprints(chat_id):
+        file_name = str(row["file_name"] or "")
+        if not archive_file_allowed(file_name):
+            continue
+        score = archive_search_score(file_name, terms)
+        if score > 0:
+            ranked.append((score, row))
+
+    ranked.sort(key=lambda pair: (pair[0], int(pair[1]["message_id"])), reverse=True)
+    return [row for _, row in ranked[:max(1, min(12, limit))]]
+
+
+def human_file_size(size_value: int) -> str:
+    size = max(0, int(size_value or 0))
+    if size >= 1024 ** 3:
+        return f"{size / (1024 ** 3):.2f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / (1024 ** 2):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
+def archive_result_lines(chat: Chat, rows: list[sqlite3.Row], max_items: int = 6) -> list[str]:
+    lines: list[str] = []
+    for index, row in enumerate(rows[:max_items], start=1):
+        file_name = str(row["file_name"] or "archivo")
+        file_size = human_file_size(int(row["file_size"] or 0))
+        sender = str(row["sender_name"] or "usuario desconocido")
+        link = build_message_link(chat, int(row["message_id"]))
+
+        line = f"{index}. 📦 {file_name} · {file_size} · {sender}"
+        if link:
+            line += f"\n   🔗 {link}"
+        lines.append(line)
+    return lines
+
+
+def archive_query_from_natural_text(text_value: str) -> str | None:
+    normalized = normalize_intent(text_value or "").strip()
+    if not re.search(r"\b(pecos|peco)\b", normalized):
+        return None
+
+    intent = (
+        "busca" in normalized
+        or "buscar" in normalized
+        or "encuentra" in normalized
+        or "tenemos" in normalized
+        or "tienes" in normalized
+        or "hay algo" in normalized
+        or "hay archivo" in normalized
+        or "hay archivos" in normalized
+        or "archivo para" in normalized
+        or "archivos para" in normalized
+        or "que hay para" in normalized
+        or "que tenemos" in normalized
+    )
+    if not intent:
+        return None
+
+    terms = extract_archive_terms(text_value)
+    if not terms:
+        return ""
+    return " ".join(terms)
+
+
+def archive_hint_key(chat_id: int, terms: list[str]) -> tuple[int, str]:
+    return (chat_id, "|".join(sorted(terms[:3])))
+
+
+def archive_hint_allowed(chat_id: int, terms: list[str]) -> bool:
+    key = archive_hint_key(chat_id, terms)
+    now = time.monotonic()
+    previous = RECENT_ARCHIVE_HINTS.get(key)
+    if previous is not None and now - previous < ARCHIVE_AUTO_COOLDOWN_SECONDS:
+        return False
+
+    expired = [
+        item for item, ts in RECENT_ARCHIVE_HINTS.items()
+        if now - ts > ARCHIVE_AUTO_COOLDOWN_SECONDS * 2
+    ]
+    for item in expired:
+        RECENT_ARCHIVE_HINTS.pop(item, None)
+
+    RECENT_ARCHIVE_HINTS[key] = now
+    return True
+
+
+def technical_archive_terms(text_value: str) -> list[str]:
+    terms = extract_archive_terms(text_value)
+    if not terms:
+        return []
+
+    model_terms = [
+        term for term in terms
+        if any(ch.isalpha() for ch in term) and any(ch.isdigit() for ch in term)
+    ]
+    technical_words = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
+
+    if model_terms:
+        return (technical_words + model_terms)[:4]
+
+    # Sin un modelo alfanumérico exigimos al menos dos pistas técnicas para no invadir.
+    if len(technical_words) >= 2:
+        return technical_words[:4]
+
+    return []
+
+
+def archive_name_similarity(name_a: str, name_b: str) -> float:
+    a = archive_stem_for_similarity(name_a)
+    b = archive_stem_for_similarity(name_b)
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+async def send_archive_search_results(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str,
+    *,
+    clean_command: bool = False,
+) -> bool:
+    chat = message.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("📦 La búsqueda del archivo de Pecos funciona dentro del grupo.")
+        return True
+
+    if clean_command:
+        await delete_group_command_invocation(message, context)
+
+    terms = extract_archive_terms(query)
+    if not terms:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="🤠 Dime qué modelo, programa o palabra debo buscar. Ejemplo: «Pecos busca XPR7550»."
+        )
+        return True
+
+    rows = search_archive_rows(chat.id, " ".join(terms))
+    usuario = display_name(message)
+
+    if not rows:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"🌵 {usuario}, Pecos revisó el archivo del pueblo y no encontró coincidencias para "
+                f"«{' '.join(terms)}»."
+            ),
+        )
+        return True
+
+    lines = [
+        f"📚 {usuario}, Pecos encontró {len(rows)} coincidencia(s) para «{' '.join(terms)}»:"
+    ]
+    lines.extend(archive_result_lines(chat, rows))
+    lines.append("\n🤠 Pecos buscó por nombre y metadatos guardados; no abrió ni extrajo los RAR/ZIP/7Z.")
+
+    await context.bot.send_message(chat_id=chat.id, text="\n\n".join(lines))
+    db.add_history(
+        f"ARCHIVO BUSCADO | {usuario} | {' '.join(terms)} | resultados={len(rows)}"
+    )
+    return True
+
+
+async def handle_archive_natural_query(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not message.text:
+        return False
+    query = archive_query_from_natural_text(message.text)
+    if query is None:
+        return False
+    return await send_archive_search_results(message, context, query)
+
+
+async def maybe_offer_related_files(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not message.text:
+        return False
+    if re.search(r"\b(pecos|peco)\b", normalize_intent(message.text)):
+        return False
+    if len(message.text) > 350:
+        return False
+
+    terms = technical_archive_terms(message.text)
+    if not terms:
+        return False
+    if not archive_hint_allowed(message.chat_id, terms):
+        return False
+
+    rows = search_archive_rows(message.chat_id, " ".join(terms), limit=3)
+    if not rows:
+        return False
+
+    # Si solo existe una coincidencia, exigimos que haya un modelo alfanumérico explícito.
+    has_model = any(any(c.isalpha() for c in t) and any(c.isdigit() for c in t) for t in terms)
+    if len(rows) == 1 and not has_model:
+        return False
+
+    lines = [
+        f"👀 Pecos levantó una oreja: encontré {len(rows)} archivo(s) relacionado(s) con «{' '.join(terms)}»."
+    ]
+    lines.extend(archive_result_lines(message.chat, rows, max_items=3))
+    lines.append(f"\n📡 Para revisar más: «Pecos busca {' '.join(terms)}». ")
+
+    await context.bot.send_message(chat_id=message.chat_id, text="\n\n".join(lines))
+    return True
+
+
+async def handle_file_detective(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """
+    Fase 3, modo detective.
+
+    Se ejecuta DESPUÉS del detector de duplicados. Si el archivo era duplicado,
+    handle_duplicate ya retornó True y esta función ni siquiera se invoca.
+    Aquí solo analizamos archivos que Pecos registró como contenido nuevo.
+    """
+    if not message.document:
+        return False
+
+    file_name = getattr(message.document, "file_name", "") or ""
+    if not archive_file_allowed(file_name):
+        return False
+
+    current = db.fingerprint_by_message(message.chat_id, message.message_id)
+    if current is None:
+        # Duplicados desactivados o huella aún no registrada: no inventamos conclusiones.
+        return False
+
+    current_sha = str(current["sha256"] or "")
+    current_size = int(current["file_size"] or 0)
+    candidates = [
+        row for row in db.list_archive_fingerprints(message.chat_id)
+        if int(row["message_id"]) != message.message_id
+        and str(row["sha256"] or "") != current_sha
+        and archive_file_allowed(str(row["file_name"] or ""))
+    ]
+
+    if not candidates:
+        return False
+
+    exact_name = None
+    same_size = None
+    family = None
+    family_score = 0.0
+
+    current_lower = file_name.casefold()
+    for row in candidates:
+        other_name = str(row["file_name"] or "")
+        other_size = int(row["file_size"] or 0)
+        similarity = archive_name_similarity(file_name, other_name)
+
+        if exact_name is None and other_name.casefold() == current_lower:
+            exact_name = row
+            continue
+
+        if (
+            same_size is None
+            and current_size > 0
+            and other_size == current_size
+            and similarity >= 0.50
+        ):
+            same_size = row
+
+        if similarity > family_score:
+            family_score = similarity
+            family = row
+
+    notice_type = ""
+    related = None
+    text_value = ""
+
+    if exact_name is not None:
+        notice_type = "same_name_new_hash"
+        related = exact_name
+        text_value = (
+            f"🕵️ Pecos abrió la lupa: «{file_name}» ya existía con exactamente el mismo nombre, "
+            "pero esta copia tiene una huella SHA-256 distinta. No es un duplicado exacto; "
+            "puede ser otra versión o contenido modificado."
+        )
+    elif same_size is not None:
+        notice_type = "same_size_new_hash"
+        related = same_size
+        text_value = (
+            f"🎯 Pecos encontró algo curioso con «{file_name}»: coincide en tamaño con un archivo "
+            "parecido del archivo histórico, pero la huella SHA-256 es diferente. Mismo peso, "
+            "contenido distinto."
+        )
+    elif family is not None and family_score >= ARCHIVE_DETECTIVE_SIMILARITY:
+        notice_type = "possible_version_family"
+        related = family
+        text_value = (
+            f"📦 Pecos encontró un pariente de «{file_name}». El nombre se parece bastante a otro "
+            "archivo del grupo, pero la huella es distinta. Puede tratarse de otra versión."
+        )
+    else:
+        return False
+
+    related_message_id = int(related["message_id"])
+    if not db.claim_archive_detective_notice(
+        message.chat_id,
+        message.message_id,
+        notice_type,
+        related_message_id,
+    ):
+        return False
+
+    related_name = str(related["file_name"] or "archivo")
+    link = build_message_link(message.chat, related_message_id)
+    text_value += f"\n\n📄 Relacionado: {related_name}"
+    if link:
+        text_value += f"\n🔗 {link}"
+    text_value += "\n🤠 Pecos informa; no elimina ninguno porque sus contenidos no son idénticos."
+
+    await context.bot.send_message(chat_id=message.chat_id, text=text_value)
+    db.add_history(
+        f"DETECTIVE ARCHIVO | {notice_type} | nuevo={file_name} relacionado={related_name}"
+    )
+    return True
+
+
 def find_blocked_term(text: str) -> str | None:
     for term in db.list_terms():
         # Equivalente al criterio usado en C#: evita coincidencias dentro de palabras.
@@ -1936,7 +2433,7 @@ async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• elimina el mensaje restringido y responde con humor\n"
         "• saluda y se despide\n"
         "• puede enviar mensajes diarios\n"
-        "• encuestas, recuerdos, humor, bromas internas y reacciones\n• memoria básica de usuarios, avisos contextuales y detector de silencio con personalidad\n• reconocimiento de aportes y detector de preguntas repetidas\n"
+        "• encuestas, recuerdos, humor, bromas internas y reacciones\n• memoria básica de usuarios, avisos contextuales y detector de silencio con personalidad\n• archivo inteligente: búsqueda, relaciones y modo detective\n• reconocimiento de aportes y detector de preguntas repetidas\n"
         "• administración privada mediante botones"
     )
 
@@ -2152,6 +2649,20 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await respond(
             "No encontré ese recuerdo o no tienes permiso para borrarlo."
         )
+
+
+async def command_search_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    query = " ".join(context.args).strip()
+    await send_archive_search_results(
+        message,
+        context,
+        query,
+        clean_command=True,
+    )
 
 
 async def command_pecos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3970,6 +4481,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ):
         if await handle_duplicate(message, context):
             return
+        # Fase 3: el veredicto de duplicados ya terminó. Si el contenido es nuevo,
+        # Pecos puede comparar nombre/tamaño/familia sin alterar la decisión SHA-256.
+        await handle_file_detective(message, context)
 
     if (
         not is_edited
@@ -4012,7 +4526,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # Fase 3: una consulta explícita al archivo tiene prioridad sobre la
+        # respuesta genérica de "Pecos".
+        if await handle_archive_natural_query(message, context):
+            return
+
         if await handle_direct_pecos_mention(message):
+            return
+
+        if await maybe_offer_related_files(message, context):
             return
 
         if await handle_contextual_phrase(message):
@@ -4121,6 +4643,7 @@ async def post_init(application: Application) -> None:
         BotCommand("recuerdos", "Ver recuerdos del grupo"),
         BotCommand("olvidar", "Borrar un recuerdo propio por ID"),
         BotCommand("pecos", "Llamar a Pecos"),
+        BotCommand("buscar", "Buscar archivos históricos"),
         BotCommand("consejo", "Pedir un consejo a Pecos"),
         BotCommand("frase", "Frase de Pecos"),
         BotCommand("excusa", "Generar una excusa"),
@@ -4245,6 +4768,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("recuerdos", command_memories), group=0)
     app.add_handler(CommandHandler("olvidar", command_forget), group=0)
     app.add_handler(CommandHandler("pecos", command_pecos), group=0)
+    app.add_handler(CommandHandler("buscar", command_search_archive), group=0)
     app.add_handler(CommandHandler("consejo", command_advice), group=0)
     app.add_handler(CommandHandler("frase", command_phrase), group=0)
     app.add_handler(CommandHandler("excusa", command_excuse), group=0)
