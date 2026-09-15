@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.5-clean-duplicate-message"
+VERSION = "2.4.6-new-member-rules-warning"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -162,6 +162,11 @@ PENDING_ADMIN_ACTION: dict[int, str] = {}
 RECENT_PECOS_CONTEXT: dict[int, float] = {}
 PECOS_CONTEXT_SECONDS = 120
 
+# Ventana breve para detectar si un usuario recién ingresado pregunta
+# inmediatamente sin haber tenido tiempo razonable de revisar reglas/archivos.
+NEW_MEMBER_RULE_WINDOW_SECONDS = 30
+NEW_MEMBER_JOINED_AT: dict[tuple[int, int], float] = {}
+
 FUN_MODERATION_MESSAGES = [
     "👀 {usuario}, Pecos estaba mirando. Ese mensaje tomó un vuelo directo fuera del chat. ✈️",
     "🤠 Easy, partner {usuario}... Pecos pasó la escoba y ese mensaje ya es historia.",
@@ -217,6 +222,20 @@ COLLECTIVE_GREETINGS = [
     "🦅 Pecos escuchó «saludos a todos» desde lejos. Gracias, {usuario}; aquí también hay un bot sensible esperando su saludo. 🤠",
     "😅 Gracias, {usuario}. Pecos no apareció en la lista, pero voy a hacer como que «todos» me incluía. ¡Saludos!",
     "⭐ ¡Un saludo de vuelta, {usuario}! Pecos sigue aquí, humilde y discretamente incluido en ese «todos»... espero. 🥹",
+]
+
+
+NEW_USER_RULE_MESSAGES = [
+    "🤠 {usuario}, veo que llegaste preguntando más rápido de lo que Pecos desenfunda. Me parece que te saltaste las reglas del grupo. Échales una mirada y revisa los archivos antes de que tengamos un duelo... y te aviso que Pecos juega de local. 🌵",
+    "👀 {usuario}, acabas de entrar y ya vienes con preguntas... Pecos sospecha que las reglas quedaron sin estrenar. Revísalas primero, partner, y date una vuelta por los archivos.",
+    "🌵 Easy, partner {usuario}... llevas menos de 30 segundos en el pueblo y ya estás preguntando. Primero revisa las reglas y los archivos del grupo; Pecos estará mirando. 😎",
+    "⭐ Sheriff Pecos reportando: {usuario} entró, vio las reglas pasar de largo y fue directo a preguntar. Un vistazo a los archivos primero, partner. Después conversamos. 🤠",
+    "🕵️ {usuario}, Pecos hizo las cuentas: recién llegaste y ya apareció una pregunta. Eso huele a reglas sin leer. Busca primero en los archivos... no querrás desafiar al sheriff tan temprano. 🌵",
+    "🎯 {usuario}, velocidad impresionante: entrar al grupo y preguntar en menos de 30 segundos. Ahora intenta superar el siguiente desafío: leer las reglas y revisar los archivos. Pecos confía en ti. Más o menos. 😏",
+    "🚂 {usuario}, ese tren salió demasiado rápido de la estación. Antes de preguntar, date una vuelta por las reglas y los archivos del grupo. Pecos estará mirando desde el saloon. 🤠",
+    "😂 {usuario}, ni Pecos desenfunda tan rápido. Recién llegaste y ya tenemos pregunta. Primero revisa las reglas y los archivos, partner... después evitamos el duelo.",
+    "🦅 Pecos vio todo desde arriba, {usuario}: entrada al grupo, cero escala en las reglas y directo a preguntar. Vuelve un par de pasos y revisa los archivos. 🤠",
+    "📡 Alerta desde los United States: usuario nuevo preguntando antes de revisar las reglas. {usuario}, busca primero en los archivos si no quieres un duelo con Pecos. Spoiler: Pecos viene entrenando. 😎",
 ]
 
 GENERAL_GREETINGS = [
@@ -2460,6 +2479,132 @@ async def moderate_if_needed(
     return True
 
 
+def mark_new_member(chat_id: int, user_id: int) -> None:
+    """
+    Registra el instante en que un usuario entra al grupo.
+    El dato es temporal y solo vive en memoria durante unos segundos.
+    """
+    now = time.monotonic()
+
+    # Limpieza perezosa para evitar acumular entradas antiguas.
+    expired = [
+        key
+        for key, joined_at in NEW_MEMBER_JOINED_AT.items()
+        if now - joined_at > NEW_MEMBER_RULE_WINDOW_SECONDS + 10
+    ]
+    for key in expired:
+        NEW_MEMBER_JOINED_AT.pop(key, None)
+
+    NEW_MEMBER_JOINED_AT[(chat_id, user_id)] = now
+
+
+def is_new_member_within_rule_window(chat_id: int, user_id: int) -> bool:
+    joined_at = NEW_MEMBER_JOINED_AT.get((chat_id, user_id))
+    if joined_at is None:
+        return False
+
+    elapsed = time.monotonic() - joined_at
+    if elapsed <= NEW_MEMBER_RULE_WINDOW_SECONDS:
+        return True
+
+    NEW_MEMBER_JOINED_AT.pop((chat_id, user_id), None)
+    return False
+
+
+def looks_like_question(text_value: str) -> bool:
+    """
+    Detecta preguntas explícitas y consultas típicas sin exigir siempre '?'.
+    Se mantiene deliberadamente conservador para no molestar a quien solo saluda.
+    """
+    if not text_value:
+        return False
+
+    normalized = normalize_intent(text_value).strip()
+
+    if "?" in text_value:
+        return True
+
+    question_patterns = (
+        r"\bcomo\b",
+        r"\bdonde\b",
+        r"\bcuando\b",
+        r"\bquien\b",
+        r"\bquienes\b",
+        r"\bcual\b",
+        r"\bcuales\b",
+        r"\bpor que\b",
+        r"\balguien sabe\b",
+        r"\balguien tiene\b",
+        r"\bsaben si\b",
+        r"\btienen\b",
+        r"\bpueden\b",
+        r"\bme pueden\b",
+        r"\bconsulta\b",
+        r"\bbusco\b",
+        r"\bnecesito\b",
+    )
+
+    return any(re.search(pattern, normalized) for pattern in question_patterns)
+
+
+async def handle_new_member_question(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """
+    Si un usuario recién ingresado pregunta dentro de los primeros 30 segundos,
+    Pecos le recuerda con ironía que revise reglas y archivos.
+
+    Responde una sola vez por ingreso y nunca molesta a administradores.
+    """
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    key = (message.chat_id, user.id)
+
+    if not is_new_member_within_rule_window(message.chat_id, user.id):
+        return False
+
+    text_value = message.text or message.caption or ""
+    if not looks_like_question(text_value):
+        return False
+
+    # Administradores de Pecos: nunca reciben este aviso.
+    if is_admin(user.id):
+        NEW_MEMBER_JOINED_AT.pop(key, None)
+        return False
+
+    # Administradores reales del grupo tampoco reciben el aviso.
+    try:
+        member = await context.bot.get_chat_member(message.chat_id, user.id)
+        status = str(getattr(member, "status", "")).lower()
+        if status in {"administrator", "creator", "owner"}:
+            NEW_MEMBER_JOINED_AT.pop(key, None)
+            return False
+    except TelegramError:
+        # Si Telegram no permite consultar el estado, no bloqueamos la función.
+        pass
+
+    # Una sola intervención por ingreso.
+    NEW_MEMBER_JOINED_AT.pop(key, None)
+
+    usuario = display_name(message)
+    await message.reply_text(
+        choose_random(
+            "new_user_rules",
+            NEW_USER_RULE_MESSAGES,
+            usuario,
+        )
+    )
+
+    db.add_history(
+        f"REGLAS NUEVO USUARIO | {usuario} preguntó dentro de "
+        f"{NEW_MEMBER_RULE_WINDOW_SECONDS}s en chat {message.chat_id}."
+    )
+    return True
+
+
 def mark_pecos_context(chat_id: int) -> None:
     RECENT_PECOS_CONTEXT[chat_id] = time.monotonic()
 
@@ -2586,6 +2731,9 @@ async def handle_new_members(
         return False
 
     for member in real_members:
+        # Abre una ventana de 30 segundos para detectar preguntas inmediatas.
+        mark_new_member(message.chat_id, member.id)
+
         if member.username:
             usuario = f"@{member.username}"
         else:
@@ -2915,6 +3063,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Moderación tiene prioridad sobre saludos/respuestas.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await moderate_if_needed(message, context):
+            return
+
+    # Usuario recién ingresado que pregunta antes de revisar reglas/archivos.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_new_member_question(message, context):
             return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
