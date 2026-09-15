@@ -57,8 +57,10 @@ from telegram.ext import (
     filters,
 )
 
+from hydrogram import Client as MTProtoClient
+
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.2.2-pecos-presence-read"
+VERSION = "2.3.0-mtproto-sha256"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -87,6 +89,17 @@ LOCAL_BOT_API_URL = (
     os.getenv("LOCAL_BOT_API_URL", "http://127.0.0.1:8081").strip()
     or "http://127.0.0.1:8081"
 ).rstrip("/")
+
+# Cliente MTProto directo para leer el contenido real de archivos grandes.
+# Este canal NO usa getFile de Bot API y por tanto evita el fallo
+# "Wrong file_id or the file is temporarily unavailable".
+_TELEGRAM_API_ID_RAW = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+try:
+    TELEGRAM_API_ID = int(_TELEGRAM_API_ID_RAW) if _TELEGRAM_API_ID_RAW else 0
+except ValueError:
+    TELEGRAM_API_ID = 0
+
 
 def _load_admin_user_ids() -> set[int]:
     # Variable nueva: admite uno o varios IDs separados por coma, punto y coma o espacios.
@@ -1877,19 +1890,13 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "dups:info":
-        if LOCAL_BOT_API:
-            detail = (
-                "• Bot API local: ACTIVA.\n"
-                "• Pecos calcula SHA-256 del contenido real sin el límite público de 20 MB.\n"
-                "• Si cambian el nombre pero el contenido es idéntico, el SHA-256 coincide.\n"
-                "• FileUniqueId se usa como detección rápida adicional."
-            )
-        else:
-            detail = (
-                "• Bot API pública: activa.\n"
-                "• FileUniqueId se compara para todos los tamaños.\n"
-                "• SHA-256 real solo se calcula hasta 20 MB."
-            )
+        detail = (
+            "• SHA-256 principal: MTProto directo, por bloques y sin depender de getFile.\n"
+            "• Funciona también con archivos grandes.\n"
+            "• Si cambian el nombre pero el contenido es idéntico, el SHA-256 coincide.\n"
+            "• Bot API local queda solo como respaldo.\n"
+            "• FileUniqueId se usa como detección rápida adicional."
+        )
 
         await query.message.reply_text(
             "ℹ️ Duplicados en Pecos\n\n"
@@ -2027,6 +2034,43 @@ async def get_file_resilient(
     raise RuntimeError(f"No se pudo obtener getFile para {file_name}")
 
 
+async def sha256_via_mtproto(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+    file_name: str,
+    expected_size: int,
+) -> tuple[str, int]:
+    """
+    Calcula SHA-256 leyendo el archivo directamente desde Telegram por MTProto.
+
+    Hydrogram acepta el file_id del Bot API para la MISMA cuenta bot y entrega
+    el contenido por bloques. No dependemos de getFile ni de rutas locales.
+    """
+    client = context.application.bot_data.get("mtproto_client")
+    if client is None:
+        raise RuntimeError("Cliente MTProto no inicializado")
+
+    digest = hashlib.sha256()
+    total = 0
+
+    async for chunk in client.stream_media(file_id):
+        if not chunk:
+            continue
+        digest.update(chunk)
+        total += len(chunk)
+
+    if expected_size > 0 and total != expected_size:
+        raise RuntimeError(
+            f"MTProto entregó tamaño distinto para {file_name}: "
+            f"esperado={expected_size}, recibido={total}"
+        )
+
+    if total <= 0:
+        raise RuntimeError(f"MTProto no entregó contenido para {file_name}")
+
+    return digest.hexdigest(), total
+
+
 def media_info(message: Message):
     obj = None
     if message.document:
@@ -2129,7 +2173,36 @@ async def handle_duplicate(
         async with HASH_SEMAPHORE:
             started = time.monotonic()
 
-            if LOCAL_BOT_API:
+            # Ruta PRINCIPAL: MTProto directo. Lee el contenido real del archivo
+            # desde Telegram y calcula SHA-256 por bloques, sin usar getFile.
+            mtproto_error: Exception | None = None
+            try:
+                sha256, actual_size = await sha256_via_mtproto(
+                    context, file_id, file_name, file_size
+                )
+                elapsed = time.monotonic() - started
+                log.info(
+                    "SHA-256 MTProto calculado | archivo=%s | informado=%s | recibido=%s "
+                    "| tiempo=%.2fs | digest=%s...",
+                    file_name,
+                    file_size,
+                    actual_size,
+                    elapsed,
+                    sha256[:12],
+                )
+            except Exception as exc:
+                mtproto_error = exc
+                log.warning(
+                    "MTPROTO: fallo leyendo archivo=%s size=%s tipo=%s detalle=%s",
+                    file_name,
+                    file_size,
+                    type(exc).__name__,
+                    str(exc),
+                )
+
+            # Respaldo: conservar el mecanismo local anterior SOLO si MTProto falla.
+            # El duplicado ya no depende de este canal para funcionar normalmente.
+            if not sha256 and LOCAL_BOT_API:
                 telegram_file = await get_file_resilient(
                     context, file_id, file_name, file_size
                 )
@@ -2138,9 +2211,8 @@ async def handle_duplicate(
 
                 if local_path is None:
                     raise RuntimeError(
-                        "Bot API local devolvió una ruta que Pecos no puede abrir: "
-                        f"{raw_file_path!r}. Telegram Bot API y Pecos deben compartir "
-                        "el mismo contenedor/sistema de archivos."
+                        "MTProto falló y Bot API local devolvió una ruta inaccesible: "
+                        f"{raw_file_path!r}. Error MTProto: {mtproto_error}"
                     )
 
                 actual_size = await wait_for_complete_local_file(
@@ -2148,25 +2220,19 @@ async def handle_duplicate(
                     file_size,
                     timeout_seconds=300,
                 )
-
                 sha256 = await asyncio.to_thread(sha256_file, local_path)
-
                 elapsed = time.monotonic() - started
                 log.info(
-                    "SHA-256 calculado | archivo=%s | informado=%s | local=%s "
-                    "| tiempo=%.2fs | digest=%s... | path=%s",
+                    "SHA-256 fallback local calculado | archivo=%s | informado=%s "
+                    "| local=%s | tiempo=%.2fs | digest=%s...",
                     file_name,
                     file_size,
                     actual_size,
                     elapsed,
                     sha256[:12],
-                    local_path,
                 )
 
-            elif file_size and file_size <= MAX_HASH_DOWNLOAD:
-                # Compatibilidad de emergencia si alguien desactiva por error
-                # la Bot API local. La API pública solo permite este flujo para
-                # archivos pequeños.
+            if not sha256 and file_size and file_size <= MAX_HASH_DOWNLOAD:
                 telegram_file = await get_file_resilient(
                     context, file_id, file_name, file_size
                 )
@@ -2174,10 +2240,10 @@ async def handle_duplicate(
                 sha256 = await asyncio.to_thread(
                     lambda: hashlib.sha256(bytes(data)).hexdigest()
                 )
-            else:
+
+            if not sha256:
                 raise RuntimeError(
-                    "LOCAL_BOT_API está desactivada y el archivo supera el límite "
-                    "permitido para calcular SHA-256 mediante la Bot API pública."
+                    f"No fue posible leer el contenido del archivo. Error MTProto: {mtproto_error}"
                 )
 
             if not sha256:
@@ -2921,6 +2987,30 @@ async def post_init(application: Application) -> None:
                     menu_button=MenuButtonCommands(),
                 )
 
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        raise RuntimeError(
+            "Faltan TELEGRAM_API_ID/TELEGRAM_API_HASH: son necesarios para "
+            "la verificación exacta de archivos grandes por MTProto."
+        )
+
+    mtproto_client = MTProtoClient(
+        "pecos_mtproto",
+        api_id=TELEGRAM_API_ID,
+        api_hash=TELEGRAM_API_HASH,
+        bot_token=BOT_TOKEN,
+        workdir=str(DATA_DIR),
+        no_updates=True,
+        max_concurrent_transmissions=1,
+    )
+    await mtproto_client.start()
+    application.bot_data["mtproto_client"] = mtproto_client
+    mt_me = await mtproto_client.get_me()
+    log.info(
+        "MTProto directo activo como @%s | sesión=%s",
+        getattr(mt_me, "username", None) or getattr(mt_me, "id", "bot"),
+        DATA_DIR / "pecos_mtproto.session",
+    )
+
     application.bot_data["daily_task"] = asyncio.create_task(daily_loop(application))
 
     me = await application.bot.get_me()
@@ -2942,6 +3032,11 @@ async def post_shutdown(application: Application) -> None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    mtproto_client = application.bot_data.get("mtproto_client")
+    if mtproto_client is not None:
+        with contextlib.suppress(Exception):
+            await mtproto_client.stop()
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
