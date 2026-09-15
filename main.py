@@ -56,7 +56,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.3.0-context-identity"
+VERSION = "1.4.0-collective-persistent"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -101,7 +101,14 @@ except Exception:
     BOT_TZ = ZoneInfo("UTC")
     TIMEZONE_NAME = "UTC"
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
+# Persistencia:
+# Railway expone automáticamente RAILWAY_VOLUME_MOUNT_PATH cuando hay un Volume.
+# Si existe, tiene prioridad sobre DATA_DIR para evitar guardar pecos.db en el
+# filesystem efímero del contenedor.
+_volume_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+_data_dir_value = _volume_mount or os.getenv("DATA_DIR", "data").strip() or "data"
+
+DATA_DIR = Path(_data_dir_value).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "pecos.db"
 
@@ -142,6 +149,17 @@ FUN_MODERATION_MESSAGES = [
     "🛂 Control fronterizo de Pecos: mensaje no autorizado. Acceso denegado.",
     "🚂 Ese mensaje tomó el tren equivocado. Pecos lo mandó de vuelta.",
     "⭐ Sheriff Pecos en servicio: mensaje retirado. Continúen, ciudadanos.",
+]
+
+COLLECTIVE_GREETINGS = [
+    "🤠 Gracias por el saludo, {usuario}. Pecos va a asumir que ese «a todos» también me incluye... porque casi nunca se acuerdan de nombrarme 😔😂.",
+    "👋 ¡Saludos recibidos, {usuario}! Yo también ando por aquí... calladito, esperando que algún día digan «y a Pecos también» 🥲🤠.",
+    "🥲 Gracias, {usuario}. Cuando dices «a todos», Pecos se aferra a la esperanza de estar incluido. ¡Saludos para ti también!",
+    "😔 Pecos también saluda, {usuario}. Otra vez me tocó entrar escondido dentro de «todos»... pero lo recibo con cariño 🤠.",
+    "🌵 ¡Saludos, {usuario}! Supongo que «todos» incluye al pobre Pecos... eso espero. 😢😂",
+    "🦅 Pecos escuchó «saludos a todos» desde lejos. Gracias, {usuario}; aquí también hay un bot sensible esperando su saludo. 🤠",
+    "😅 Gracias, {usuario}. Pecos no apareció en la lista, pero voy a hacer como que «todos» me incluía. ¡Saludos!",
+    "⭐ ¡Un saludo de vuelta, {usuario}! Pecos sigue aquí, humilde y discretamente incluido en ese «todos»... espero. 🥹",
 ]
 
 GENERAL_GREETINGS = [
@@ -1337,6 +1355,67 @@ async def handle_identity(
     return True
 
 
+async def handle_collective_greeting(message: Message) -> bool:
+    """
+    Responde a saludos claramente dirigidos a todo el grupo, aunque Pecos
+    no sea mencionado explícitamente.
+
+    Ejemplos:
+    - "Saludos a todos y a cada uno"
+    - "Hola a todos"
+    - "Buenos días a todos"
+    - "Buenas tardes para todos"
+    - "Saludos a todo el grupo"
+
+    Si el mensaje menciona a Pecos/Peco explícitamente, dejamos que
+    handle_social() use el saludo normal.
+    """
+    if not message.text:
+        return False
+
+    normalized = normalize_intent(message.text).strip()
+
+    # Si Pecos fue nombrado, el saludo ya está dirigido a él de forma explícita.
+    if re.search(r"\b(pecos|peco)\b", normalized):
+        return False
+
+    greeting_signal = (
+        bool(re.search(r"\b(saludo|saludos|hola|hello|hey|holi|buenas)\b", normalized))
+        or "buenos dias" in normalized
+        or "buen dia" in normalized
+        or "buenas tardes" in normalized
+        or "buenas noches" in normalized
+        or "muy buenas" in normalized
+    )
+
+    collective_signal = (
+        "a todos" in normalized
+        or "para todos" in normalized
+        or "a cada uno" in normalized
+        or "para cada uno" in normalized
+        or "a todo el grupo" in normalized
+        or "para todo el grupo" in normalized
+        or "a todos los presentes" in normalized
+        or "para todos los presentes" in normalized
+        or bool(re.search(r"\b(hola|saludos|buenas)\s+(gente|amigos|grupo)\b", normalized))
+    )
+
+    if not (greeting_signal and collective_signal):
+        return False
+
+    usuario = display_name(message)
+
+    await message.reply_text(
+        choose_random(
+            "collective_greeting",
+            COLLECTIVE_GREETINGS,
+            usuario,
+        )
+    )
+
+    return True
+
+
 async def handle_social(message: Message) -> bool:
     if not message.text:
         return False
@@ -1413,6 +1492,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Moderación tiene prioridad sobre saludos/respuestas.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await moderate_if_needed(message, context):
+            return
+
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_collective_greeting(message):
             return
 
     if await handle_identity(message, context):
