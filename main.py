@@ -56,9 +56,14 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "1.4.0-collective-persistent"
+VERSION = "1.5.0-special-daily-persistent"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
+
+# Saludo especial diario para un usuario concreto.
+SPECIAL_DAILY_USERNAME = "leosedf"
+SPECIAL_DAILY_MESSAGE = "¡Saltar Contraseñas Carajo!"
+SPECIAL_DAILY_EVENT_KEY = "special_daily_greeting:leosedf"
 
 BOT_TOKEN = (
     os.getenv("BOT_TOKEN")
@@ -263,6 +268,15 @@ class Database:
                 message_id INTEGER NOT NULL,
                 first_seen TEXT NOT NULL,
                 PRIMARY KEY(chat_id, sha256)
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_user_events (
+                event_key TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                local_date TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(event_key, user_id, local_date)
             );
             """
         )
@@ -472,6 +486,51 @@ class Database:
             self.conn.execute("DELETE FROM file_hashes")
             self.conn.commit()
         return unique_count, hash_count
+
+    def claim_daily_user_event(
+        self,
+        event_key: str,
+        user_id: int,
+        username: str,
+        local_date: str,
+    ) -> bool:
+        """
+        Devuelve True solo la primera vez que ese usuario dispara ese evento
+        en la fecha local indicada. El registro queda persistido en SQLite.
+        """
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+
+        with self.lock:
+            before = self.conn.total_changes
+
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO daily_user_events
+                    (event_key, user_id, local_date, username, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    user_id,
+                    local_date,
+                    username,
+                    now,
+                ),
+            )
+
+            inserted = self.conn.total_changes > before
+
+            # Conservamos solo un margen razonable de historial diario.
+            self.conn.execute(
+                """
+                DELETE FROM daily_user_events
+                WHERE local_date < date('now', '-45 day')
+                """
+            )
+
+            self.conn.commit()
+
+        return inserted
 
 
 db = Database(DB_PATH)
@@ -1355,6 +1414,45 @@ async def handle_identity(
     return True
 
 
+async def handle_special_daily_user_greeting(
+    message: Message,
+) -> bool:
+    """
+    Si @leosedf escribe por primera vez en el día, Pecos responde una sola vez.
+    El control queda guardado en SQLite, por lo que sobrevive a redeploys,
+    reinicios del bot y actualizaciones de main.py.
+    """
+    user = message.from_user
+
+    if not user or not user.username:
+        return False
+
+    if user.username.casefold() != SPECIAL_DAILY_USERNAME.casefold():
+        return False
+
+    today = datetime.now(BOT_TZ).strftime("%Y-%m-%d")
+
+    first_today = db.claim_daily_user_event(
+        SPECIAL_DAILY_EVENT_KEY,
+        user.id,
+        user.username,
+        today,
+    )
+
+    if not first_today:
+        return False
+
+    await message.reply_text(
+        SPECIAL_DAILY_MESSAGE
+    )
+
+    db.add_history(
+        f"SALUDO ESPECIAL DIARIO enviado a @{user.username}."
+    )
+
+    return True
+
+
 async def handle_collective_greeting(message: Message) -> bool:
     """
     Responde a saludos claramente dirigidos a todo el grupo, aunque Pecos
@@ -1479,6 +1577,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     is_edited = bool(update.edited_message or update.edited_channel_post)
+
+    # Saludo especial persistente para @leosedf:
+    # una sola vez por día, en su primera aparición.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        await handle_special_daily_user_greeting(message)
 
     # Duplicados solo en mensajes NUEVOS de grupos.
     if (
