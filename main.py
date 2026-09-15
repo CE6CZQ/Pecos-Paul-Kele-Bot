@@ -60,7 +60,7 @@ from telegram.ext import (
 from hydrogram import Client as MTProtoClient
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.3.0-mtproto-sha256"
+VERSION = "2.3.1-mtproto-lazy-start"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -158,6 +158,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("pecos")
 
 HASH_SEMAPHORE = asyncio.Semaphore(1)
+MTPROTO_INIT_LOCK = asyncio.Lock()
 
 # Acciones de administración que están esperando texto del administrador.
 # No contienen datos sensibles y pueden perderse al reiniciar sin afectar config.
@@ -2034,6 +2035,50 @@ async def get_file_resilient(
     raise RuntimeError(f"No se pudo obtener getFile para {file_name}")
 
 
+async def ensure_mtproto_client(
+    application: Application,
+):
+    """
+    Inicializa MTProto solo cuando realmente hace falta comprobar un archivo.
+    Un fallo de MTProto nunca debe impedir que Pecos arranque ni que /start,
+    /config y el resto de comandos funcionen.
+    """
+    client = application.bot_data.get("mtproto_client")
+    if client is not None:
+        return client
+
+    async with MTPROTO_INIT_LOCK:
+        client = application.bot_data.get("mtproto_client")
+        if client is not None:
+            return client
+
+        if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+            raise RuntimeError(
+                "Faltan TELEGRAM_API_ID/TELEGRAM_API_HASH para MTProto."
+            )
+
+        client = MTProtoClient(
+            "pecos_mtproto",
+            api_id=TELEGRAM_API_ID,
+            api_hash=TELEGRAM_API_HASH,
+            bot_token=BOT_TOKEN,
+            workdir=str(DATA_DIR),
+            no_updates=True,
+            max_concurrent_transmissions=1,
+        )
+
+        await client.start()
+        application.bot_data["mtproto_client"] = client
+
+        me = await client.get_me()
+        log.info(
+            "MTProto iniciado bajo demanda como @%s",
+            getattr(me, "username", None) or getattr(me, "id", "bot"),
+        )
+
+        return client
+
+
 async def sha256_via_mtproto(
     context: ContextTypes.DEFAULT_TYPE,
     file_id: str,
@@ -2042,13 +2087,9 @@ async def sha256_via_mtproto(
 ) -> tuple[str, int]:
     """
     Calcula SHA-256 leyendo el archivo directamente desde Telegram por MTProto.
-
-    Hydrogram acepta el file_id del Bot API para la MISMA cuenta bot y entrega
-    el contenido por bloques. No dependemos de getFile ni de rutas locales.
+    MTProto se inicia bajo demanda para no bloquear el arranque normal de Pecos.
     """
-    client = context.application.bot_data.get("mtproto_client")
-    if client is None:
-        raise RuntimeError("Cliente MTProto no inicializado")
+    client = await ensure_mtproto_client(context.application)
 
     digest = hashlib.sha256()
     total = 0
@@ -2987,29 +3028,10 @@ async def post_init(application: Application) -> None:
                     menu_button=MenuButtonCommands(),
                 )
 
-    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-        raise RuntimeError(
-            "Faltan TELEGRAM_API_ID/TELEGRAM_API_HASH: son necesarios para "
-            "la verificación exacta de archivos grandes por MTProto."
-        )
-
-    mtproto_client = MTProtoClient(
-        "pecos_mtproto",
-        api_id=TELEGRAM_API_ID,
-        api_hash=TELEGRAM_API_HASH,
-        bot_token=BOT_TOKEN,
-        workdir=str(DATA_DIR),
-        no_updates=True,
-        max_concurrent_transmissions=1,
-    )
-    await mtproto_client.start()
-    application.bot_data["mtproto_client"] = mtproto_client
-    mt_me = await mtproto_client.get_me()
-    log.info(
-        "MTProto directo activo como @%s | sesión=%s",
-        getattr(mt_me, "username", None) or getattr(mt_me, "id", "bot"),
-        DATA_DIR / "pecos_mtproto.session",
-    )
+    # MTProto NO se inicia aquí.
+    # Se inicializa bajo demanda al procesar un archivo para que cualquier
+    # problema de MTProto jamás bloquee /start, /config o el long polling.
+    log.info("MTProto configurado para inicio bajo demanda.")
 
     application.bot_data["daily_task"] = asyncio.create_task(daily_loop(application))
 
