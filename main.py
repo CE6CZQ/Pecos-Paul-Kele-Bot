@@ -29,7 +29,6 @@ import sqlite3
 import threading
 import time
 import unicodedata
-import time
 from urllib.parse import unquote, urlparse
 from datetime import datetime
 from pathlib import Path
@@ -59,7 +58,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.1.3-large-file-race-fix"
+VERSION = "2.2.0-unified-local-api-sha256"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -612,36 +611,7 @@ class Database:
             )
             self.conn.commit()
 
-    def find_fingerprint(
-        self,
-        chat_id: int,
-        sha256: str,
-        message_id: int,
-    ) -> sqlite3.Row | None:
-        with self.lock:
-            row = self.conn.execute(
-                """
-                SELECT
-                    chat_id,
-                    sha256,
-                    message_id,
-                    file_unique_id,
-                    file_name,
-                    file_size,
-                    sender_id,
-                    sender_name,
-                    first_seen
-                FROM file_fingerprints
-                WHERE chat_id = ? AND sha256 = ?
-                """,
-                (chat_id, sha256),
-            ).fetchone()
-
-        if row and int(row["message_id"]) != message_id:
-            return row
-        return None
-
-    def store_fingerprint(
+    def claim_fingerprint(
         self,
         chat_id: int,
         sha256: str,
@@ -651,11 +621,20 @@ class Database:
         file_size: int,
         sender_id: int,
         sender_name: str,
-    ) -> None:
+    ) -> sqlite3.Row | None:
+        """
+        Registra atómicamente la huella SHA-256.
+
+        Devuelve None si este mensaje consiguió registrar la huella como original.
+        Devuelve la fila del original si la huella ya existía en el mismo chat.
+
+        La clave primaria (chat_id, sha256) hace que SQLite sea la autoridad final:
+        el nombre del archivo no participa en la decisión de duplicado.
+        """
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
 
         with self.lock:
-            self.conn.execute(
+            cur = self.conn.execute(
                 """
                 INSERT OR IGNORE INTO file_fingerprints
                     (
@@ -683,7 +662,48 @@ class Database:
                     now,
                 ),
             )
+
+            inserted = cur.rowcount == 1
+
+            # Mantener también la tabla histórica de hashes por compatibilidad
+            # con bases de datos creadas por versiones anteriores de Pecos.
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO file_hashes
+                    (chat_id, sha256, message_id, first_seen)
+                VALUES(?, ?, ?, ?)
+                """,
+                (chat_id, sha256, message_id, now),
+            )
+
             self.conn.commit()
+
+            if inserted:
+                return None
+
+            row = self.conn.execute(
+                """
+                SELECT
+                    chat_id,
+                    sha256,
+                    message_id,
+                    file_unique_id,
+                    file_name,
+                    file_size,
+                    sender_id,
+                    sender_name,
+                    first_seen
+                FROM file_fingerprints
+                WHERE chat_id = ? AND sha256 = ?
+                """,
+                (chat_id, sha256),
+            ).fetchone()
+
+        if row and int(row["message_id"]) != message_id:
+            return row
+
+        # El mismo update puede reintentarse; no debe considerarse duplicado de sí mismo.
+        return None
 
     def duplicate_counts(self) -> tuple[int, int]:
         with self.lock:
@@ -1752,7 +1772,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Grupos conocidos: {len(groups)}\n"
             f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
             f"Hora diaria: {db.get_setting('daily_time')} ({TIMEZONE_NAME})\n"
-            f"Bot API: {'LOCAL (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
+            f"Bot API: {'LOCAL integrada (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
             f"Bromas internas: {len(db.list_jokes())}\n"
             f"Detector de silencio: {'Activo' if db.is_true('silence_enabled') else 'Desactivado'} "
             f"({db.get_setting('silence_hours', '8')} h)\n"
@@ -1989,6 +2009,16 @@ async def handle_duplicate(
     message: Message,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> bool:
+    """
+    Detecta duplicados por contenido real.
+
+    En la arquitectura unificada, Telegram Bot API y Pecos viven en el mismo
+    contenedor. En LOCAL_BOT_API el file_path devuelto por getFile es una ruta
+    absoluta accesible directamente por Pecos, incluso para archivos grandes.
+
+    Criterio principal: SHA-256 del contenido. El nombre del archivo NO se usa
+    para decidir si es duplicado.
+    """
     info = media_info(message)
     if not info:
         return False
@@ -2008,128 +2038,111 @@ async def handle_duplicate(
     else:
         sender_name = display_name(message)
 
+    if not file_id:
+        return False
+
     try:
-        # Detección rápida por identificador de Telegram.
-        if unique_id:
-            if db.unique_file_seen(chat_id, unique_id, message_id):
-                try:
-                    await context.bot.delete_message(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                    )
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            "🤠 Easy, partner... ese archivo ya pasó por aquí. "
-                            "Pecos lo reconoció por su identificador de Telegram. 📂👀\n\n"
-                            "El duplicado fue retirado."
-                        ),
-                    )
-                    db.add_history(
-                        f"DUPLICADO eliminado por FileUniqueId en chat {chat_id}: {file_name}"
-                    )
-                    return True
-                except TelegramError as exc:
-                    log.warning(
-                        "Duplicado detectado por FileUniqueId, pero no se pudo eliminar: %s",
-                        exc,
-                    )
-                    return False
-
-            db.store_unique_file(chat_id, unique_id, message_id)
-
-        if not file_id:
-            return False
+        # FileUniqueId es una vía rápida adicional. No sustituye al SHA-256.
+        # Solo consultamos aquí; el ID se registra después de que el archivo
+        # haya sido procesado correctamente.
+        if unique_id and db.unique_file_seen(chat_id, unique_id, message_id):
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ Pecos retiró un archivo que Telegram ya había "
+                        "identificado previamente en este grupo.\n\n"
+                        f"📄 Archivo: {file_name}"
+                    ),
+                )
+                db.add_history(
+                    f"DUPLICADO eliminado por FileUniqueId en chat {chat_id}: {file_name}"
+                )
+                return True
+            except TelegramError as exc:
+                log.warning(
+                    "Duplicado detectado por FileUniqueId, pero no se pudo eliminar: %s",
+                    exc,
+                )
+                return False
 
         sha256 = None
         original = None
 
-        # IMPORTANTE:
-        # Serializamos TODO el tramo crítico:
-        # obtener archivo -> esperar tamaño completo -> hash -> consultar DB -> registrar.
-        # En versiones anteriores solo estaba protegido el cálculo del hash; dos archivos
-        # grandes podían procesarse simultáneamente y ambos consultar la DB antes de que
-        # el primero quedara registrado.
+        # Serializamos lectura + hash + reclamación de huella. Además, SQLite
+        # protege la clave primaria (chat_id, sha256), por lo que el registro
+        # del original es atómico.
         async with HASH_SEMAPHORE:
             started = time.monotonic()
 
             if LOCAL_BOT_API:
                 telegram_file = await context.bot.get_file(file_id)
-
-                local_path = resolve_local_file_path(
-                    getattr(telegram_file, "file_path", None)
-                )
+                raw_file_path = getattr(telegram_file, "file_path", None)
+                local_path = resolve_local_file_path(raw_file_path)
 
                 if local_path is None:
-                    try:
-                        downloaded_path = await telegram_file.download_to_drive()
-                        local_path = resolve_local_file_path(str(downloaded_path))
-                    except Exception as download_exc:
-                        log.warning(
-                            "HASH LOCAL: no se pudo resolver/copiar archivo=%s size=%s: %s",
-                            file_name,
-                            file_size,
-                            type(download_exc).__name__,
-                        )
-
-                if local_path is None or not local_path.is_file():
                     raise RuntimeError(
-                        f"HASH LOCAL: ruta inaccesible para {file_name} ({file_size} bytes)"
+                        "Bot API local devolvió una ruta que Pecos no puede abrir: "
+                        f"{raw_file_path!r}. Telegram Bot API y Pecos deben compartir "
+                        "el mismo contenedor/sistema de archivos."
                     )
 
                 actual_size = await wait_for_complete_local_file(
                     local_path,
                     file_size,
-                    timeout_seconds=120,
+                    timeout_seconds=300,
                 )
 
-                sha256 = await asyncio.to_thread(
-                    sha256_file,
-                    local_path,
-                )
+                sha256 = await asyncio.to_thread(sha256_file, local_path)
 
                 elapsed = time.monotonic() - started
-
                 log.info(
                     "SHA-256 calculado | archivo=%s | informado=%s | local=%s "
-                    "| tiempo=%.2fs | digest=%s...",
+                    "| tiempo=%.2fs | digest=%s... | path=%s",
                     file_name,
                     file_size,
                     actual_size,
                     elapsed,
                     sha256[:12],
+                    local_path,
                 )
 
             elif file_size and file_size <= MAX_HASH_DOWNLOAD:
+                # Compatibilidad de emergencia si alguien desactiva por error
+                # la Bot API local. La API pública solo permite este flujo para
+                # archivos pequeños.
                 telegram_file = await context.bot.get_file(file_id)
                 data = await telegram_file.download_as_bytearray()
-
                 sha256 = await asyncio.to_thread(
                     lambda: hashlib.sha256(bytes(data)).hexdigest()
                 )
+            else:
+                raise RuntimeError(
+                    "LOCAL_BOT_API está desactivada y el archivo supera el límite "
+                    "permitido para calcular SHA-256 mediante la Bot API pública."
+                )
 
             if not sha256:
-                return False
+                raise RuntimeError("No se obtuvo SHA-256 para el archivo.")
 
-            original = db.find_fingerprint(
-                chat_id,
-                sha256,
-                message_id,
+            original = db.claim_fingerprint(
+                chat_id=chat_id,
+                sha256=sha256,
+                message_id=message_id,
+                file_unique_id=unique_id,
+                file_name=file_name,
+                file_size=file_size,
+                sender_id=sender_id,
+                sender_name=sender_name,
             )
 
-            # Si NO existe, se registra ANTES de liberar el semáforo.
-            # Así el siguiente archivo idéntico necesariamente lo encontrará.
             if original is None:
-                db.store_fingerprint(
-                    chat_id=chat_id,
-                    sha256=sha256,
-                    message_id=message_id,
-                    file_unique_id=unique_id,
-                    file_name=file_name,
-                    file_size=file_size,
-                    sender_id=sender_id,
-                    sender_name=sender_name,
-                )
+                if unique_id:
+                    db.store_unique_file(chat_id, unique_id, message_id)
 
                 log.info(
                     "HUELLA registrada | archivo=%s | size=%s | digest=%s...",
@@ -2137,10 +2150,9 @@ async def handle_duplicate(
                     file_size,
                     sha256[:12],
                 )
-
                 return False
 
-        # A partir de aquí ya sabemos que había un original registrado.
+        # Si llegamos aquí, SQLite confirmó que el SHA-256 ya estaba registrado.
         try:
             await context.bot.delete_message(
                 chat_id=chat_id,
@@ -2165,7 +2177,8 @@ async def handle_duplicate(
                     f"📄 Original: {original_name}\n"
                     f"👤 Enviado por: {original_sender}\n"
                     f"🕘 Primera vez: {first_seen_text}\n\n"
-                    f"El archivo «{file_name}» tenía el mismo SHA-256 y fue retirado."
+                    f"El archivo «{file_name}» tiene exactamente el mismo SHA-256 "
+                    "y fue retirado. El nombre del archivo no influye en la comparación."
                 ),
             )
 
@@ -2180,7 +2193,6 @@ async def handle_duplicate(
                 original_name,
                 sha256[:12],
             )
-
             return True
 
         except TelegramError as exc:
