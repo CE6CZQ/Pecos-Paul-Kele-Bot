@@ -59,7 +59,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.4.8-pecos-attentive-20"
+VERSION = "2.4.9-clean-group-commands"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -1201,6 +1201,60 @@ async def safe_edit(query, text: str, markup: InlineKeyboardMarkup | None = None
             raise
 
 
+
+async def delete_group_command_invocation(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """
+    En grupos, elimina el mensaje /comando del usuario para que el chat quede
+    limpio. Telegram puede mostrar /comando@NombreDelBot al seleccionar un
+    comando desde el menú; eso lo decide el cliente de Telegram. Pecos no puede
+    cambiar cómo se escribe antes de enviarlo, pero sí puede retirar el mensaje
+    inmediatamente después de recibirlo.
+
+    Devuelve True si el chat es grupo/supergrupo, aunque Telegram no permita
+    borrar el mensaje. La respuesta del bot igualmente se enviará como mensaje
+    independiente y nunca como reply.
+    """
+    chat = message.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return False
+
+    with contextlib.suppress(TelegramError):
+        await context.bot.delete_message(
+            chat_id=chat.id,
+            message_id=message.message_id,
+        )
+    return True
+
+
+async def send_clean_command_text(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """
+    En grupos:
+      1) retira el /comando del usuario;
+      2) envía la respuesta de Pecos como mensaje independiente.
+
+    En privado conserva el comportamiento normal de reply_text.
+    """
+    is_group = await delete_group_command_invocation(message, context)
+
+    if is_group:
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
+
+
+
 async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
@@ -1221,7 +1275,7 @@ async def command_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text += "\n\n¿Qué quieres hacer?"
         await message.reply_text(text, reply_markup=start_menu())
     else:
-        await message.reply_text(text)
+        await send_clean_command_text(message, context, text)
 
 
 async def command_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1232,7 +1286,7 @@ async def command_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if chat.type != ChatType.PRIVATE:
-        await message.reply_text("🆔 Por seguridad, pregúntame tu ID por chat privado.")
+        await send_clean_command_text(message, context, "🆔 Por seguridad, pregúntame tu ID por chat privado.")
         return
 
     await message.reply_text(f"🆔 Tu Telegram User ID es:\n\n{user.id}")
@@ -1246,7 +1300,7 @@ async def command_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if chat.type != ChatType.PRIVATE:
-        await message.reply_text("⚙️ La configuración solo está disponible por chat privado.")
+        await send_clean_command_text(message, context, "⚙️ La configuración solo está disponible por chat privado.")
         return
 
     if not ADMIN_USER_IDS:
@@ -1275,9 +1329,19 @@ async def command_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not message or not chat:
         return
 
+    # En grupos retiramos el comando inmediatamente. context.args ya fue
+    # interpretado por python-telegram-bot, por lo que no perdemos sus datos.
+    is_group = await delete_group_command_invocation(message, context)
+
+    async def respond(text_value: str) -> None:
+        if is_group:
+            await context.bot.send_message(chat_id=chat.id, text=text_value)
+        else:
+            await message.reply_text(text_value)
+
     raw = " ".join(context.args).strip()
     if not raw:
-        await message.reply_text(
+        await respond(
             "Uso:\n"
             "/encuesta ¿Asado sábado?\n\n"
             "O con opciones propias:\n"
@@ -1289,14 +1353,14 @@ async def command_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     question = parts[0]
 
     if not (1 <= len(question) <= 300):
-        await message.reply_text("La pregunta debe tener entre 1 y 300 caracteres.")
+        await respond("La pregunta debe tener entre 1 y 300 caracteres.")
         return
 
     options = parts[1:] if len(parts) >= 3 else ["Sí", "No", "Quizás"]
     options = options[:10]
 
     if len(options) < 2:
-        await message.reply_text("Necesito al menos dos opciones.")
+        await respond("Necesito al menos dos opciones.")
         return
 
     try:
@@ -1307,7 +1371,7 @@ async def command_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             is_anonymous=False,
         )
     except TelegramError as exc:
-        await message.reply_text(f"No pude crear la encuesta: {exc}")
+        await respond(f"No pude crear la encuesta: {exc}")
 
 
 async def command_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1321,15 +1385,22 @@ async def command_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await message.reply_text("«Pecos recuerda» está pensado para usarse dentro del grupo.")
         return
 
+    # El comando desaparece; Pecos responde como mensaje normal.
+    await delete_group_command_invocation(message, context)
+
     memory_text = " ".join(context.args).strip()
     if not memory_text:
-        await message.reply_text(
-            "Uso:\n/recordar reunión viernes 20:00"
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Uso:\n/recordar reunión viernes 20:00",
         )
         return
 
     if len(memory_text) > 800:
-        await message.reply_text("Ese recuerdo es demasiado largo. Máximo 800 caracteres.")
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Ese recuerdo es demasiado largo. Máximo 800 caracteres.",
+        )
         return
 
     memory_id = db.add_memory(
@@ -1339,9 +1410,12 @@ async def command_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         display_name(message),
     )
 
-    await message.reply_text(
-        f"🧠 Pecos lo recuerda. ID #{memory_id}\n"
-        f"«{memory_text}»"
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=(
+            f"🧠 Pecos lo recuerda. ID #{memory_id}\n"
+            f"«{memory_text}»"
+        ),
     )
 
 
@@ -1355,10 +1429,15 @@ async def command_memories(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await message.reply_text("Los recuerdos pertenecen a cada grupo.")
         return
 
+    await delete_group_command_invocation(message, context)
+
     rows = db.list_memories(chat.id, 30)
 
     if not rows:
-        await message.reply_text("🧠 Pecos no tiene recuerdos guardados en este grupo.")
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="🧠 Pecos no tiene recuerdos guardados en este grupo.",
+        )
         return
 
     lines = ["🧠 Recuerdos del grupo:\n"]
@@ -1378,8 +1457,16 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not chat or not user:
         return
 
+    is_group = await delete_group_command_invocation(message, context)
+
+    async def respond(text_value: str) -> None:
+        if is_group:
+            await context.bot.send_message(chat_id=chat.id, text=text_value)
+        else:
+            await message.reply_text(text_value)
+
     if not context.args or not context.args[0].isdigit():
-        await message.reply_text("Uso: /olvidar 12")
+        await respond("Uso: /olvidar 12")
         return
 
     memory_id = int(context.args[0])
@@ -1391,9 +1478,9 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     if deleted:
-        await message.reply_text(f"🧠 Pecos olvidó el recuerdo #{memory_id}.")
+        await respond(f"🧠 Pecos olvidó el recuerdo #{memory_id}.")
     else:
-        await message.reply_text(
+        await respond(
             "No encontré ese recuerdo o no tienes permiso para borrarlo."
         )
 
@@ -1401,33 +1488,55 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def command_pecos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(
-            choose_random("pecos_command", PECOS_CALLED_MESSAGES, display_name(message))
+        await send_clean_command_text(
+            message,
+            context,
+            choose_random(
+                "pecos_command",
+                PECOS_CALLED_MESSAGES,
+                display_name(message),
+            ),
         )
 
 
 async def command_advice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(random.choice(ADVICE_MESSAGES))
+        await send_clean_command_text(
+            message,
+            context,
+            random.choice(ADVICE_MESSAGES),
+        )
 
 
 async def command_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(random.choice(PHRASE_MESSAGES))
+        await send_clean_command_text(
+            message,
+            context,
+            random.choice(PHRASE_MESSAGES),
+        )
 
 
 async def command_excuse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(random.choice(EXCUSE_MESSAGES))
+        await send_clean_command_text(
+            message,
+            context,
+            random.choice(EXCUSE_MESSAGES),
+        )
 
 
 async def command_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(random.choice(FORECAST_MESSAGES))
+        await send_clean_command_text(
+            message,
+            context,
+            random.choice(FORECAST_MESSAGES),
+        )
 
 
 async def command_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
