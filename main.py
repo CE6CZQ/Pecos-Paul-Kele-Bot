@@ -29,6 +29,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from urllib.parse import unquote, urlparse
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -57,7 +58,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.1.1-local-bot-api-secure-logs"
+VERSION = "2.1.2-local-hash-fix"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -1877,6 +1878,31 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
 
+def resolve_local_file_path(raw_path: str | None) -> Path | None:
+    """
+    Resuelve de forma robusta el file_path entregado por Telegram Bot API --local.
+
+    Telegram documenta que getFile en modo local devuelve una ruta absoluta.
+    PTB también puede devolver un file:// URI en algunos flujos. Aquí aceptamos
+    ambas formas y evitamos depender de download_to_drive() para el hash.
+    """
+    if not raw_path:
+        return None
+
+    value = str(raw_path).strip()
+
+    if value.startswith("file://"):
+        parsed = urlparse(value)
+        value = unquote(parsed.path)
+
+    candidate = Path(value)
+
+    if candidate.is_absolute() and candidate.is_file():
+        return candidate
+
+    return None
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
 
@@ -1977,23 +2003,60 @@ async def handle_duplicate(
         sha256 = None
 
         # Modo fuerte: Telegram Bot API Server local.
-        # getFile devuelve una ruta absoluta accesible en ESTE MISMO contenedor.
+        # En --local, getFile entrega la ruta absoluta REAL del archivo.
+        # La usamos directamente en vez de depender de download_to_drive().
         if LOCAL_BOT_API:
             telegram_file = await context.bot.get_file(file_id)
 
-            local_path = await telegram_file.download_to_drive()
-            local_path = Path(local_path)
+            local_path = resolve_local_file_path(
+                getattr(telegram_file, "file_path", None)
+            )
 
-            if not local_path.is_absolute() or not local_path.exists():
+            # Fallback defensivo: PTB debería devolver la misma ruta local,
+            # pero lo intentamos si file_path no pudo resolverse directamente.
+            if local_path is None:
+                try:
+                    downloaded_path = await telegram_file.download_to_drive()
+                    local_path = resolve_local_file_path(str(downloaded_path))
+                except Exception as download_exc:
+                    log.warning(
+                        "HASH LOCAL: no se pudo resolver/copiar archivo=%s size=%s: %s",
+                        file_name,
+                        file_size,
+                        type(download_exc).__name__,
+                    )
+
+            if local_path is None or not local_path.is_file():
                 raise RuntimeError(
-                    f"Bot API local devolvió una ruta no accesible: {local_path}"
+                    f"HASH LOCAL: ruta inaccesible para {file_name} ({file_size} bytes)"
                 )
+
+            # Validación adicional: no es requisito para comparar, pero nos ayuda
+            # a detectar rutas incorrectas sin usar nombre+tamaño como criterio.
+            try:
+                actual_size = local_path.stat().st_size
+                if file_size and actual_size != file_size:
+                    log.warning(
+                        "HASH LOCAL: tamaño informado=%s tamaño local=%s archivo=%s",
+                        file_size,
+                        actual_size,
+                        file_name,
+                    )
+            except OSError:
+                pass
 
             async with HASH_SEMAPHORE:
                 sha256 = await asyncio.to_thread(
                     sha256_file,
                     local_path,
                 )
+
+            log.info(
+                "SHA-256 calculado | archivo=%s | size=%s | digest=%s...",
+                file_name,
+                file_size,
+                sha256[:12],
+            )
 
         # Compatibilidad de emergencia con la Bot API pública.
         elif file_size and file_size <= MAX_HASH_DOWNLOAD:
@@ -2069,8 +2132,16 @@ async def handle_duplicate(
         return False
 
     except Exception as exc:
-        log.warning("No se pudo comprobar duplicado: %s", exc)
-        db.add_history(f"ERROR duplicados: {exc}")
+        log.warning(
+            "DUPLICADOS: fallo comprobando archivo=%s size=%s tipo=%s detalle=%s",
+            file_name,
+            file_size,
+            type(exc).__name__,
+            str(exc),
+        )
+        db.add_history(
+            f"ERROR duplicados [{type(exc).__name__}] {file_name}: {exc}"
+        )
         return False
 
 
