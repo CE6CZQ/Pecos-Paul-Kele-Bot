@@ -47,7 +47,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatType
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -58,7 +58,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.2.0-unified-local-api-sha256"
+VERSION = "2.2.1-resilient-large-files"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -1977,6 +1977,56 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+async def get_file_resilient(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+    file_name: str,
+    file_size: int,
+):
+    """
+    Obtiene el archivo desde la Bot API local con reintentos.
+
+    Telegram Bot API local puede responder temporalmente con
+    "Wrong file_id or the file is temporarily unavailable" mientras
+    materializa archivos grandes. También reintenta cortes breves del
+    servidor local.
+    """
+    delays = (0, 2, 4, 8, 12, 20, 30)
+    last_exc: Exception | None = None
+
+    for attempt, delay in enumerate(delays, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+
+        try:
+            return await context.bot.get_file(file_id)
+        except BadRequest as exc:
+            text = str(exc).casefold()
+            retryable = (
+                "wrong file_id" in text
+                or "temporarily unavailable" in text
+            )
+            if not retryable:
+                raise
+            last_exc = exc
+        except NetworkError as exc:
+            last_exc = exc
+
+        log.warning(
+            "GETFILE temporal | intento=%s/%s | archivo=%s | size=%s | error=%s",
+            attempt,
+            len(delays),
+            file_name,
+            file_size,
+            type(last_exc).__name__ if last_exc else "desconocido",
+        )
+
+    if last_exc is not None:
+        raise last_exc
+
+    raise RuntimeError(f"No se pudo obtener getFile para {file_name}")
+
+
 def media_info(message: Message):
     obj = None
     if message.document:
@@ -2080,7 +2130,9 @@ async def handle_duplicate(
             started = time.monotonic()
 
             if LOCAL_BOT_API:
-                telegram_file = await context.bot.get_file(file_id)
+                telegram_file = await get_file_resilient(
+                    context, file_id, file_name, file_size
+                )
                 raw_file_path = getattr(telegram_file, "file_path", None)
                 local_path = resolve_local_file_path(raw_file_path)
 
@@ -2115,7 +2167,9 @@ async def handle_duplicate(
                 # Compatibilidad de emergencia si alguien desactiva por error
                 # la Bot API local. La API pública solo permite este flujo para
                 # archivos pequeños.
-                telegram_file = await context.bot.get_file(file_id)
+                telegram_file = await get_file_resilient(
+                    context, file_id, file_name, file_size
+                )
                 data = await telegram_file.download_as_bytearray()
                 sha256 = await asyncio.to_thread(
                     lambda: hashlib.sha256(bytes(data)).hexdigest()
