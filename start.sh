@@ -7,22 +7,40 @@ set -eu
 
 ROOT_DATA="${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
 
-# Solo la base de datos de Pecos debe ser persistente.
-# Los archivos de Telegram son temporales.
-TELEGRAM_DATA="/tmp/telegram-bot-api-data"
+# Estado pequeño y persistente del servidor Bot API.
+TELEGRAM_STATE="${ROOT_DATA}/telegram-bot-api-state"
+
+# Los archivos grandes van únicamente al disco efímero del contenedor.
+TELEGRAM_FILES="/tmp/telegram-bot-api-files"
 TELEGRAM_TEMP="/tmp/telegram-bot-api-temp"
 
-mkdir -p "${ROOT_DATA}" "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
-chown -R telegram-bot-api:telegram-bot-api "${TELEGRAM_DATA}" "${TELEGRAM_TEMP}"
+mkdir -p "${ROOT_DATA}" "${TELEGRAM_STATE}"
+
+rm -rf "${TELEGRAM_FILES}" "${TELEGRAM_TEMP}"
+mkdir -p "${TELEGRAM_FILES}" "${TELEGRAM_TEMP}"
+
+chown -R telegram-bot-api:telegram-bot-api \
+    "${TELEGRAM_STATE}" \
+    "${TELEGRAM_FILES}" \
+    "${TELEGRAM_TEMP}"
+
+# Ya no usamos Hydrogram/MTProto.
+rm -f \
+    "${ROOT_DATA}/pecos_mtproto.session" \
+    "${ROOT_DATA}/pecos_mtproto.session-journal" \
+    2>/dev/null || true
 
 export LOCAL_BOT_API=1
 export LOCAL_BOT_API_URL="http://127.0.0.1:8081"
+export TELEGRAM_FILES_DIR="${TELEGRAM_FILES}"
 
 TELEGRAM_PID=""
 PECOS_PID=""
 
 start_telegram_api() {
     echo "[BOT API] Iniciando servidor local..."
+    echo "[BOT API] Estado persistente: ${TELEGRAM_STATE}"
+    echo "[BOT API] Archivos efímeros: ${TELEGRAM_FILES}"
 
     telegram-bot-api \
         --api-id="${TELEGRAM_API_ID}" \
@@ -30,7 +48,8 @@ start_telegram_api() {
         --local \
         --http-ip-address=127.0.0.1 \
         --http-port=8081 \
-        --dir="${TELEGRAM_DATA}" \
+        --dir="${TELEGRAM_STATE}" \
+        --files-dir="${TELEGRAM_FILES}" \
         --temp-dir="${TELEGRAM_TEMP}" \
         --username=telegram-bot-api \
         --groupname=telegram-bot-api \
@@ -76,10 +95,11 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "=============================================="
-echo " Pecos Paul Kele - arquitectura unificada"
+echo " Pecos Paul Kele 2.4.0 - duplicados final"
 echo "=============================================="
 echo "Datos persistentes: ${ROOT_DATA}"
-echo "Telegram Bot API:   ${TELEGRAM_DATA}"
+echo "Estado Bot API:     ${TELEGRAM_STATE}"
+echo "Archivos Bot API:   ${TELEGRAM_FILES} (efímero)"
 
 start_telegram_api
 wait_for_telegram_api
@@ -95,7 +115,7 @@ while true; do
     fi
 
     if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
-        echo "[BOT API] El proceso se detuvo. Reiniciando sin tumbar Pecos..."
+        echo "[BOT API] El proceso se detuvo. Reiniciando con el mismo estado..."
         start_telegram_api
         wait_for_telegram_api
     fi
