@@ -57,7 +57,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.1.0-local-bot-api"
+VERSION = "2.1.1-local-bot-api-secure-logs"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -136,6 +136,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+# Evita que httpx/httpcore escriban en Railway URLs completas del Bot API.
+# Esas URLs contienen el token del bot y no deben aparecer en los logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 log = logging.getLogger("pecos")
 
 HASH_SEMAPHORE = asyncio.Semaphore(1)
