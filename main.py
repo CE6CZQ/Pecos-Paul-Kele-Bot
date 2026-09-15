@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Pecos Paul Kele Bot - versión Python para hosting 24/7 (Pella)
+Pecos Paul Kele Bot - Railway + Telegram Bot API Server local
 Administración completa desde Telegram mediante botones.
 
 Requiere:
@@ -57,7 +57,7 @@ from telegram.ext import (
 )
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.0.0-social-tools"
+VERSION = "2.1.0-local-bot-api"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -72,6 +72,20 @@ BOT_TOKEN = (
     or os.getenv("PECOS_PAUL_KELE_BOT_TOKEN")
     or ""
 ).strip()
+
+
+def env_true(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().casefold() in {"1", "true", "yes", "si", "sí", "on"}
+
+
+LOCAL_BOT_API = env_true("LOCAL_BOT_API", False)
+LOCAL_BOT_API_URL = (
+    os.getenv("LOCAL_BOT_API_URL", "http://127.0.0.1:8081").strip()
+    or "http://127.0.0.1:8081"
+).rstrip("/")
 
 def _load_admin_user_ids() -> set[int]:
     # Variable nueva: admite uno o varios IDs separados por coma, punto y coma o espacios.
@@ -123,6 +137,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("pecos")
+
+HASH_SEMAPHORE = asyncio.Semaphore(1)
 
 # Acciones de administración que están esperando texto del administrador.
 # No contienen datos sensibles y pueden perderse al reiniciar sin afectar config.
@@ -342,6 +358,25 @@ class Database:
                 first_seen TEXT NOT NULL,
                 PRIMARY KEY(chat_id, sha256)
             );
+
+
+            CREATE TABLE IF NOT EXISTS file_fingerprints (
+                chat_id INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                file_unique_id TEXT NOT NULL DEFAULT '',
+                file_name TEXT NOT NULL DEFAULT '',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                sender_id INTEGER NOT NULL DEFAULT 0,
+                sender_name TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL,
+                PRIMARY KEY(chat_id, sha256)
+            );
+
+            INSERT OR IGNORE INTO file_fingerprints
+                (chat_id, sha256, message_id, first_seen)
+            SELECT chat_id, sha256, message_id, first_seen
+            FROM file_hashes;
 
             CREATE TABLE IF NOT EXISTS daily_user_events (
                 event_key TEXT NOT NULL,
@@ -570,13 +605,86 @@ class Database:
             )
             self.conn.commit()
 
+    def find_fingerprint(
+        self,
+        chat_id: int,
+        sha256: str,
+        message_id: int,
+    ) -> sqlite3.Row | None:
+        with self.lock:
+            row = self.conn.execute(
+                """
+                SELECT
+                    chat_id,
+                    sha256,
+                    message_id,
+                    file_unique_id,
+                    file_name,
+                    file_size,
+                    sender_id,
+                    sender_name,
+                    first_seen
+                FROM file_fingerprints
+                WHERE chat_id = ? AND sha256 = ?
+                """,
+                (chat_id, sha256),
+            ).fetchone()
+
+        if row and int(row["message_id"]) != message_id:
+            return row
+        return None
+
+    def store_fingerprint(
+        self,
+        chat_id: int,
+        sha256: str,
+        message_id: int,
+        file_unique_id: str,
+        file_name: str,
+        file_size: int,
+        sender_id: int,
+        sender_name: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO file_fingerprints
+                    (
+                        chat_id,
+                        sha256,
+                        message_id,
+                        file_unique_id,
+                        file_name,
+                        file_size,
+                        sender_id,
+                        sender_name,
+                        first_seen
+                    )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    sha256,
+                    message_id,
+                    file_unique_id or "",
+                    file_name or "",
+                    int(file_size or 0),
+                    int(sender_id or 0),
+                    sender_name or "",
+                    now,
+                ),
+            )
+            self.conn.commit()
+
     def duplicate_counts(self) -> tuple[int, int]:
         with self.lock:
             unique_count = self.conn.execute(
                 "SELECT COUNT(*) AS n FROM file_unique_ids"
             ).fetchone()["n"]
             hash_count = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM file_hashes"
+                "SELECT COUNT(*) AS n FROM file_fingerprints"
             ).fetchone()["n"]
         return int(unique_count), int(hash_count)
 
@@ -585,6 +693,7 @@ class Database:
         with self.lock:
             self.conn.execute("DELETE FROM file_unique_ids")
             self.conn.execute("DELETE FROM file_hashes")
+            self.conn.execute("DELETE FROM file_fingerprints")
             self.conn.commit()
         return unique_count, hash_count
 
@@ -1636,6 +1745,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Grupos conocidos: {len(groups)}\n"
             f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
             f"Hora diaria: {db.get_setting('daily_time')} ({TIMEZONE_NAME})\n"
+            f"Bot API: {'LOCAL (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
             f"Bromas internas: {len(db.list_jokes())}\n"
             f"Detector de silencio: {'Activo' if db.is_true('silence_enabled') else 'Desactivado'} "
             f"({db.get_setting('silence_hours', '8')} h)\n"
@@ -1740,15 +1850,39 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "dups:info":
+        if LOCAL_BOT_API:
+            detail = (
+                "• Bot API local: ACTIVA.\n"
+                "• Pecos calcula SHA-256 del contenido real sin el límite público de 20 MB.\n"
+                "• Si cambian el nombre pero el contenido es idéntico, el SHA-256 coincide.\n"
+                "• FileUniqueId se usa como detección rápida adicional."
+            )
+        else:
+            detail = (
+                "• Bot API pública: activa.\n"
+                "• FileUniqueId se compara para todos los tamaños.\n"
+                "• SHA-256 real solo se calcula hasta 20 MB."
+            )
+
         await query.message.reply_text(
-            "ℹ️ Duplicados en Pella\n\n"
-            "• Todos los tamaños: Pecos compara FileUniqueId de Telegram.\n"
-            "• Hasta 20 MB: además descarga el archivo y calcula SHA-256 real.\n"
-            "• Más de 20 MB: la Bot API pública no permite descargar el contenido completo; "
-            "por eso un archivo grande re-subido con otro FileUniqueId puede no detectarse.\n\n"
-            "No usamos solo nombre+tamaño para borrar, porque podría eliminar archivos distintos."
+            "ℹ️ Duplicados en Pecos\n\n"
+            + detail
+            + "\n\nNo usamos nombre+tamaño como prueba de duplicado."
         )
         return
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+
+    return digest.hexdigest()
 
 
 def media_info(message: Message):
@@ -1789,62 +1923,148 @@ async def handle_duplicate(
 
     chat_id = message.chat_id
     message_id = message.message_id
-    unique_id = info["file_unique_id"]
+    unique_id = info["file_unique_id"] or ""
     file_id = info["file_id"]
-    file_size = info["file_size"]
+    file_size = int(info["file_size"] or 0)
+    file_name = info["file_name"] or "archivo"
+
+    sender = message.from_user
+    sender_id = int(sender.id) if sender else 0
+
+    if sender and sender.username:
+        sender_name = f"@{sender.username}"
+    else:
+        sender_name = display_name(message)
 
     try:
+        # Primera defensa: FileUniqueId. Es inmediata y no requiere leer el archivo.
         if unique_id:
             if db.unique_file_seen(chat_id, unique_id, message_id):
                 try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                    await context.bot.delete_message(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                    )
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text="🤠 Easy, partner... ese archivo ya pasó por aquí. Pecos tiene buena memoria. 📂👀\n\nEl duplicado fue retirado.",
+                        text=(
+                            "🤠 Easy, partner... ese archivo ya pasó por aquí. "
+                            "Pecos lo reconoció por su identificador de Telegram. 📂👀\\n\\n"
+                            "El duplicado fue retirado."
+                        ),
                     )
                     db.add_history(
-                        f"DUPLICADO eliminado por FileUniqueId en chat {chat_id}: {info['file_name'] or 'archivo'}"
+                        f"DUPLICADO eliminado por FileUniqueId en chat {chat_id}: {file_name}"
                     )
                     return True
                 except TelegramError as exc:
-                    log.warning("Duplicado detectado, pero no se pudo eliminar: %s", exc)
+                    log.warning(
+                        "Duplicado detectado por FileUniqueId, pero no se pudo eliminar: %s",
+                        exc,
+                    )
                     return False
 
             db.store_unique_file(chat_id, unique_id, message_id)
 
-        # SHA-256 solo si Telegram permite descargarlo por la API pública.
-        if file_id and file_size is not None and file_size <= MAX_HASH_DOWNLOAD:
+        if not file_id:
+            return False
+
+        sha256 = None
+
+        # Modo fuerte: Telegram Bot API Server local.
+        # getFile devuelve una ruta absoluta accesible en ESTE MISMO contenedor.
+        if LOCAL_BOT_API:
+            telegram_file = await context.bot.get_file(file_id)
+
+            local_path = await telegram_file.download_to_drive()
+            local_path = Path(local_path)
+
+            if not local_path.is_absolute() or not local_path.exists():
+                raise RuntimeError(
+                    f"Bot API local devolvió una ruta no accesible: {local_path}"
+                )
+
+            async with HASH_SEMAPHORE:
+                sha256 = await asyncio.to_thread(
+                    sha256_file,
+                    local_path,
+                )
+
+        # Compatibilidad de emergencia con la Bot API pública.
+        elif file_size and file_size <= MAX_HASH_DOWNLOAD:
             telegram_file = await context.bot.get_file(file_id)
             data = await telegram_file.download_as_bytearray()
+
             sha256 = await asyncio.to_thread(
                 lambda: hashlib.sha256(bytes(data)).hexdigest()
             )
 
-            if db.hash_seen(chat_id, sha256, message_id):
+        if not sha256:
+            return False
+
+        original = db.find_fingerprint(
+            chat_id,
+            sha256,
+            message_id,
+        )
+
+        if original:
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+
+                original_name = original["file_name"] or "archivo"
+                original_sender = original["sender_name"] or "otro usuario"
+
                 try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="🤠 Pecos comparó el contenido y confirmó que ese archivo ya estaba aquí. 📂🔎\n\nEl duplicado fue retirado.",
-                    )
-                    db.add_history(
-                        f"DUPLICADO eliminado por SHA-256 en chat {chat_id}: {info['file_name'] or 'archivo'}"
-                    )
-                    return True
-                except TelegramError as exc:
-                    log.warning("SHA-256 duplicado detectado, pero no se pudo eliminar: %s", exc)
-                    return False
+                    first_seen = datetime.fromisoformat(
+                        str(original["first_seen"])
+                    ).astimezone(BOT_TZ)
+                    first_seen_text = first_seen.strftime("%d/%m/%Y %H:%M")
+                except Exception:
+                    first_seen_text = str(original["first_seen"])
 
-            db.store_hash(chat_id, sha256, message_id)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ Pecos confirmó un archivo duplicado por contenido real.\\n\\n"
+                        f"📄 Original: {original_name}\\n"
+                        f"👤 Enviado por: {original_sender}\\n"
+                        f"🕘 Primera vez: {first_seen_text}\\n\\n"
+                        f"El archivo «{file_name}» tenía el mismo SHA-256 y fue retirado."
+                    ),
+                )
+
+                db.add_history(
+                    f"DUPLICADO eliminado por SHA-256 en chat {chat_id}: "
+                    f"{file_name} == {original_name}"
+                )
+                return True
+
+            except TelegramError as exc:
+                log.warning(
+                    "SHA-256 duplicado detectado, pero no se pudo eliminar: %s",
+                    exc,
+                )
+                return False
+
+        db.store_fingerprint(
+            chat_id=chat_id,
+            sha256=sha256,
+            message_id=message_id,
+            file_unique_id=unique_id,
+            file_name=file_name,
+            file_size=file_size,
+            sender_id=sender_id,
+            sender_name=sender_name,
+        )
 
         return False
 
-    except TelegramError as exc:
-        log.warning("No se pudo comprobar duplicado: %s", exc)
-        db.add_history(f"ERROR duplicados: {exc}")
-        return False
     except Exception as exc:
-        log.exception("Error inesperado comprobando duplicado")
+        log.warning("No se pudo comprobar duplicado: %s", exc)
         db.add_history(f"ERROR duplicados: {exc}")
         return False
 
@@ -2503,13 +2723,14 @@ async def post_init(application: Application) -> None:
 
     me = await application.bot.get_me()
     log.info(
-        "%s %s conectado como @%s | Admin IDs: %s | Zona: %s | DB: %s",
+        "%s %s conectado como @%s | Admin IDs: %s | Zona: %s | DB: %s | API: %s",
         APP_NAME,
         VERSION,
         me.username,
         ",".join(str(x) for x in sorted(ADMIN_USER_IDS)) if ADMIN_USER_IDS else "NO CONFIGURADOS",
         TIMEZONE_NAME,
         DB_PATH,
+        "LOCAL" if LOCAL_BOT_API else "PUBLICA",
     )
 
 
@@ -2532,12 +2753,26 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def build_application() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError(
-            "Falta BOT_TOKEN. Configura el token de BotFather como variable de entorno en Pella."
+            "Falta BOT_TOKEN. Configúralo como variable de entorno en Railway."
+        )
+
+    builder = Application.builder().token(BOT_TOKEN)
+
+    if LOCAL_BOT_API:
+        builder = (
+            builder
+            .base_url(f"{LOCAL_BOT_API_URL}/bot")
+            .base_file_url(f"{LOCAL_BOT_API_URL}/file/bot")
+            .local_mode(True)
+        )
+
+        log.info(
+            "Telegram Bot API local activada en %s",
+            LOCAL_BOT_API_URL,
         )
 
     app = (
-        Application.builder()
-        .token(BOT_TOKEN)
+        builder
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
