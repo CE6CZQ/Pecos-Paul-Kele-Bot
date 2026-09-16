@@ -61,7 +61,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.7.1-melerix-one-shot"
+VERSION = "2.7.2-melerix-xerax-one-shot"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -519,6 +519,76 @@ MELERIX_FUN_MESSAGES = [
     "😂 Melerix en conversación: Pecos activa protocolo científico de mirar y esperar qué pasa.",
     "📡 Mensaje recibido: Melerix. Respuesta de Pecos: esto promete.",
     "🌵 Melerix otra vez en boca del pueblo. Pecos oficialmente se declara curioso.",
+]
+
+
+XERAX_USERNAME = "xerax"
+
+XERAX_FUN_MESSAGES = [
+    "🤖 Apareció XeraX. Escondan los computadores antes de que los convierta en nodos para minar Bitcoin.",
+    "⚠️ Alerta XeraX: revisen el Administrador de tareas; capaz ya tienen 14 bots trabajando para él.",
+    "⛏️ XeraX entró al chat. Pecos recomienda vigilar la GPU… por si empieza a minar mientras ustedes conversan.",
+    "🪙 Cada vez que XeraX escribe, algún procesador del pueblo siente un escalofrío misterioso.",
+    "🤠 Pecos informa: XeraX está conectado. No acepten nada llamado actualizacion_definitiva_final.exe.",
+    "🚨 Código XeraX activado. Protejan routers, notebooks y cualquier cosa que tenga más de 512 MB de RAM.",
+    "🤖 XeraX dice ‘hola’ y tres bots aparecen misteriosamente en algún servidor. Coincidencia, seguramente.",
+    "💻 Si tu ventilador empezó a sonar justo cuando apareció XeraX… Pecos no quiere sacar conclusiones.",
+    "🪙 XeraX presente. En algún lugar acaba de aparecer una fracción microscópica de Bitcoin.",
+    "🌵 Pecos recomienda no dejar a XeraX solo con un VPS, Docker y una tarjeta de crédito.",
+    "📡 XeraX conectado. El tráfico de red subió misteriosamente. Pecos declara que debe ser el clima.",
+    "😂 XeraX otra vez… escondan las Raspberry Pi.",
+    "🤖 Dicen que XeraX no crea bots. Los bots simplemente aparecen cuando él llega.",
+    "🖥️ XeraX entró al grupo y algún proveedor cloud acaba de preparar una factura sin explicación.",
+    "⛏️ Atención: si XeraX pregunta cuántos núcleos tiene tu procesador, Pecos recomienda cambiar de tema.",
+    "🪙 Pecos revisó la blockchain. XeraX estaba ‘haciendo pruebas’, aparentemente.",
+    "🚜 XeraX no mina Bitcoin con GPUs. Dicen las malas lenguas que mina con todo lo que tenga enchufe.",
+    "🔌 Desenchufen las calculadoras. XeraX ya debe estar pensando cuántos hashes por segundo dan.",
+    "👀 XeraX apareció. Pecos está contando los bots antes y después de su llegada.",
+    "🤠 Tranquilos, XeraX solo vino a conversar… eso dijo también la última botnet imaginaria del pueblo.",
+    "📟 Si XeraX te pregunta tu IP, Pecos recomienda responder: ‘pregúntale al sheriff’.",
+    "🖥️ XeraX mirando un servidor: ‘qué bonito equipo… sería una pena dejarlo sin minar’.",
+    "🤖 El problema no es que XeraX tenga bots. El problema es que, según Pecos, probablemente los bots tengan a XeraX.",
+    "🌐 XeraX conectado. Internet del pueblo acaba de pedir vacaciones.",
+    "🪙 Pecos detectó actividad sospechosamente absurda: alguien intentó minar Bitcoin con la cafetera.",
+    "🔥 Si el PC empieza a calentarse después de que XeraX escribe, Pecos recomienda abrir una ventana y no acusar al clima.",
+    "🤖 XeraX no necesita agregar bots al grupo. En las leyendas del pueblo llegan solos cuando detectan a su creador.",
+    "🧮 XeraX vio una calculadora Casio y preguntó cuántos hashes por segundo daba. Pecos cambió de vereda.",
+    "📡 XeraX apareció en frecuencia. Los servidores de medio mundo, según las malas lenguas, se pusieron nerviosos.",
+    "🌵 Pecos tiene una regla sencilla: si aparece XeraX, revise CPU, RAM y que la billetera siga donde estaba.",
+    "🧠 Dicen las malas lenguas que XeraX tiene una IA trabajando 24/7. Pecos prefiere no preguntar en qué.",
+    "🤖 La IA de XeraX acaba de conectarse. Oficialmente está aprendiendo. Extraoficialmente… mejor no mirar los logs.",
+    "👀 XeraX dice que su IA solo responde preguntas. Pecos vio el consumo de CPU y mantiene sus reservas humorísticas.",
+    "🤠 Dicen las malas lenguas que XeraX entrenó una IA para ahorrar tiempo. Ahora nadie sabe qué hace con todo ese tiempo libre.",
+    "🤖 La IA de XeraX pidió acceso de administrador. Pecos escondió inmediatamente las llaves del servidor.",
+    "🪙 XeraX asegura que su IA no mina Bitcoin. Pecos responde: ‘claro, claro…’.",
+    "🌐 Dicen que la IA de XeraX empezó como asistente personal y terminó preguntando por puertos abiertos.",
+    "🧠 Pecos investigó a la IA de XeraX. La IA investigó a Pecos de vuelta. Investigación cancelada.",
+    "😂 XeraX dice: ‘es solo una IA de pruebas’. Pecos pregunta por qué entonces necesita tantos núcleos y tres VPS.",
+    "🤖 Dicen las malas lenguas que la IA de XeraX ya tiene empleados. Ninguno sabe que trabaja para ella.",
+    "📡 La IA de XeraX detectó una radio con USB. Pecos recomienda esconder el cable antes de que le instale Docker.",
+    "🖥️ XeraX le pidió a su IA que optimizara el servidor. Ahora el servidor responde únicamente en hexadecimal.",
+    "🚨 Alerta Pecos: XeraX mencionó ‘automatizar una cosita’. La última vez aparecieron nueve bots en la leyenda.",
+    "🧠 La IA de XeraX está ‘haciendo cálculos’. Curiosamente, hasta la GPU del vecino parece cansada.",
+    "👀 Dicen que XeraX tiene una IA tan avanzada que cuando preguntas qué está haciendo responde: ‘no te preocupes’.",
+    "🌵 XeraX afirma que su IA es completamente inofensiva. Pecos también afirma que sabe bailar salsa.",
+    "🪙 Rumor del pueblo: XeraX le enseñó blockchain a su IA. Desde entonces desaparecen watts misteriosamente.",
+    "📟 La IA de XeraX encontró un XPR7550. Cinco minutos después preguntó si se podía overclockear.",
+    "🤠 Pecos tiene dos reglas: no apostar con tahúres y no darle acceso root a la IA de XeraX.",
+    "🧠 Dicen las malas lenguas que la IA de XeraX ya escribió su propio bot. XeraX todavía cree que él manda.",
+    "🤖 XeraX: ‘la IA está bajo control’. IA de XeraX: ‘confirmo’. Pecos se retira lentamente.",
+    "🔌 Si XeraX dice ‘déjame probar una IA’, desenchufen todo lo que tenga procesador. Por tradición, nada más.",
+    "😂 La IA de XeraX pidió vacaciones. Nadie sabe de qué trabajo se está recuperando.",
+    "🌐 XeraX conectó su IA al servidor ‘solo para probar’. Pecos ya está mirando la factura del cloud.",
+    "📡 Dicen que la IA de XeraX escucha hasta frecuencias que todavía no fueron inventadas.",
+    "🪙 Pecos preguntó si la IA de XeraX mina Bitcoin. Respuesta: ‘ese término ya está obsoleto’. Eso preocupó más al sheriff.",
+    "🤖 Hay rumores de que XeraX tiene una IA haciendo cosas turbias. Pecos aclara: turbias, pero con excelente documentación.",
+    "🧠 La IA de XeraX no hace nada ilegal. Según la leyenda, solo hace cosas que todavía no tienen nombre.",
+    "🤠 Pecos acaba de ver a XeraX escribir ‘pip install’. Que Dios encuentre al servidor confesado.",
+    "📻 XeraX le mostró un CPS a su IA. Ahora la IA quiere privilegios de administrador en el repetidor.",
+    "📡 Dicen que la IA de XeraX puede programar un Motorola mirando solamente la antena.",
+    "🤖 XeraX conectó una radio al PC. La IA preguntó inmediatamente: ‘¿esto también puede minar?’.",
+    "📻 Pecos vio a la IA de XeraX analizando un firmware. Desde entonces el firmware analiza a Pecos.",
+    "🌵 XeraX dijo ‘solo voy a automatizar la programación de radios’. Pecos ya está preparando un refugio.",
 ]
 
 SILENCE_MESSAGES = [
@@ -4201,8 +4271,9 @@ async def handle_melerix_fun(message: Message) -> bool:
             "melerix",
         )
         if not first_use:
-            # Silencio intencional: el usuario ya consumió su única respuesta.
-            return False
+            # Silencio intencional y total para este mensaje: ya consumió su única respuesta.
+            # Retornamos True para que on_message no continúe con otros respondedores de Pecos.
+            return True
 
     await message.reply_text(
         choose_random(
@@ -4214,6 +4285,63 @@ async def handle_melerix_fun(message: Message) -> bool:
 
     db.add_history(
         f"BROMA MELERIX | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
+def message_references_xerax(message: Message) -> bool:
+    """Detecta mención textual/@username o respuesta directa a @XeraX."""
+    text_value = message.text or message.caption or ""
+    if text_value:
+        normalized = normalize_intent(text_value)
+        if re.search(r"(?<!\w)@?xerax(?!\w)", normalized):
+            return True
+
+    replied = message.reply_to_message
+    replied_user = replied.from_user if replied else None
+    replied_username = (replied_user.username or "").casefold() if replied_user else ""
+    return replied_username == XERAX_USERNAME
+
+
+async def handle_xerax_fun(message: Message) -> bool:
+    """
+    Broma especial para XeraX.
+
+    - Se activa por XeraX/@XeraX en el texto o al responder directamente a @XeraX.
+    - Cada usuario normal obtiene UNA sola respuesta por grupo.
+    - Menciones posteriores del mismo usuario quedan en silencio.
+    - El OWNER puede activarla ilimitadamente.
+    - Usa una clave separada de Melerix, por lo que ambos límites son independientes.
+    """
+    if not message.from_user or message.from_user.is_bot:
+        return False
+
+    if not message_references_xerax(message):
+        return False
+
+    user_id = int(message.from_user.id)
+
+    if not is_owner(user_id):
+        first_use = db.claim_fun_keyword_once(
+            message.chat_id,
+            user_id,
+            "xerax",
+        )
+        if not first_use:
+            # Ya usó su oportunidad XeraX: Pecos queda completamente en silencio
+            # para este mensaje y no deja que otro handler responda por accidente.
+            return True
+
+    await message.reply_text(
+        choose_random(
+            "xerax_fun",
+            XERAX_FUN_MESSAGES,
+            display_name(message),
+        )
+    )
+
+    db.add_history(
+        f"BROMA XERAX | {display_name(message)} | chat {message.chat_id}"
     )
     return True
 
@@ -4659,6 +4787,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     ):
         if await handle_melerix_fun(message):
+            return
+
+    # Broma especial XeraX: mención textual/@username o respuesta directa.
+    # Una sola respuesta persistente por usuario; OWNER sin límite.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        if await handle_xerax_fun(message):
             return
 
     # Fase 2: aprende respuestas explícitas a preguntas ya registradas y
