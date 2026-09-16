@@ -14,6 +14,7 @@ Variables de entorno:
     ADMIN_USER_ID          Compatibilidad: un solo ID antiguo (opcional)
     BOT_TIMEZONE           Ej. America/Santiago (opcional)
     DATA_DIR               Carpeta de datos (opcional, por defecto ./data)
+    ALLOWED_GROUP_IDS      Grupos donde Pecos puede operar, separados por comas
 """
 
 from __future__ import annotations
@@ -52,16 +53,18 @@ from telegram.constants import ChatType
 from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.7.2-melerix-xerax-one-shot"
+VERSION = "2.7.4-two-group-lock"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -157,6 +160,46 @@ def _load_owner_user_ids() -> set[int]:
 
 
 OWNER_USER_IDS = _load_owner_user_ids()
+
+
+def _load_allowed_group_ids() -> set[int]:
+    """
+    Grupos autorizados para Pecos.
+
+    Por seguridad, si Railway todavía no tiene ALLOWED_GROUP_IDS, esta versión
+    permite únicamente los dos grupos definidos para el proyecto:
+    - Pruebas
+    - YO REPARO RADIOS
+    """
+    raw = os.getenv(
+        "ALLOWED_GROUP_IDS",
+        "-1004469972566,-1001775566217",
+    ).strip()
+
+    result: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError as exc:
+            raise RuntimeError(
+                "ALLOWED_GROUP_IDS debe contener chat_id numéricos separados por comas."
+            ) from exc
+        if value >= 0:
+            raise RuntimeError(
+                "Cada valor de ALLOWED_GROUP_IDS debe ser un chat_id negativo de grupo/supergrupo."
+            )
+        result.add(value)
+
+    if not result:
+        raise RuntimeError("ALLOWED_GROUP_IDS no puede quedar vacío.")
+
+    return result
+
+
+ALLOWED_GROUP_IDS = _load_allowed_group_ids()
 
 TIMEZONE_NAME = os.getenv("BOT_TIMEZONE", "America/Santiago").strip() or "America/Santiago"
 
@@ -4712,6 +4755,38 @@ async def handle_social(message: Message) -> bool:
     return False
 
 
+async def enforce_allowed_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Barrera global ejecutada antes que cualquier comando, botón o mensaje.
+
+    - En Pruebas y YO REPARO RADIOS: continúa normalmente.
+    - En cualquier otro grupo/supergrupo: Pecos abandona el chat y no procesa
+      absolutamente ninguna función.
+    - Los chats privados se conservan para la administración de Pecos.
+    """
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+
+    if chat.id in ALLOWED_GROUP_IDS:
+        return
+
+    log.warning(
+        "Grupo no autorizado detectado: %s (%s). Pecos abandona el chat.",
+        chat.id,
+        getattr(chat, "title", "sin título"),
+    )
+
+    with contextlib.suppress(TelegramError):
+        await context.bot.leave_chat(chat.id)
+
+    # Impide que cualquier handler posterior procese este update.
+    raise ApplicationHandlerStop
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
@@ -4858,6 +4933,9 @@ async def check_group_silence(application: Application) -> None:
     today = now.strftime("%Y-%m-%d")
 
     for row in db.list_groups():
+        if int(row["chat_id"]) not in ALLOWED_GROUP_IDS:
+            continue
+
         try:
             last_seen = datetime.fromisoformat(str(row["last_seen"]))
         except Exception:
@@ -4896,7 +4974,10 @@ async def daily_loop(application: Application) -> None:
 
                 if now.strftime("%H:%M") == daily_time and last_sent != today:
                     text = db.get_setting("daily_message")
-                    groups = db.list_groups()
+                    groups = [
+                        row for row in db.list_groups()
+                        if int(row["chat_id"]) in ALLOWED_GROUP_IDS
+                    ]
 
                     sent = 0
                     for row in groups:
@@ -4951,10 +5032,12 @@ async def post_init(application: Application) -> None:
     )
 
 
-    await application.bot.set_my_commands(
-        group_commands,
-        scope=BotCommandScopeAllGroupChats(),
-    )
+    # Los comandos de grupo se publican únicamente en los grupos autorizados.
+    for allowed_group_id in sorted(ALLOWED_GROUP_IDS):
+        await application.bot.set_my_commands(
+            group_commands,
+            scope=BotCommandScopeChat(allowed_group_id),
+        )
 
     if ADMIN_USER_IDS:
         admin_commands = [
@@ -4979,6 +5062,16 @@ async def post_init(application: Application) -> None:
         "Duplicados: Bot API local + SHA-256 | temporales=%s",
         TELEGRAM_FILES_DIR,
     )
+    log.info("Grupos autorizados: %s", ",".join(str(x) for x in sorted(ALLOWED_GROUP_IDS)))
+
+    # Si la base conserva otros grupos antiguos, Pecos intenta salir de ellos
+    # al iniciar. No se elimina historial; simplemente quedan inactivos.
+    for row in db.list_groups():
+        chat_id = int(row["chat_id"])
+        if chat_id in ALLOWED_GROUP_IDS:
+            continue
+        with contextlib.suppress(TelegramError):
+            await application.bot.leave_chat(chat_id)
 
     application.bot_data["daily_task"] = asyncio.create_task(daily_loop(application))
 
@@ -5053,6 +5146,10 @@ def build_application() -> Application:
         .post_shutdown(post_shutdown)
         .build()
     )
+
+    # Barrera de seguridad: se ejecuta antes que cualquier otro handler.
+    # Si Pecos es agregado a otro grupo, sale de él y no procesa el update.
+    app.add_handler(TypeHandler(Update, enforce_allowed_groups), group=-100)
 
     # Comandos.
     app.add_handler(CommandHandler("start", command_start), group=0)
