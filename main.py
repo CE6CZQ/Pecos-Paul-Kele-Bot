@@ -61,7 +61,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.7.0-phase3-smart-archive"
+VERSION = "2.7.1-melerix-one-shot"
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -121,6 +121,42 @@ def _load_admin_user_ids() -> set[int]:
 
 
 ADMIN_USER_IDS = _load_admin_user_ids()
+
+
+def _load_owner_user_ids() -> set[int]:
+    """
+    Propietarios de Pecos con privilegios especiales.
+
+    Si OWNER_USER_IDS / OWNER_USER_ID no están configurados y existe exactamente
+    un ADMIN_USER_IDS, se asume que ese único administrador actual es el creador.
+    Así esta versión funciona sin exigir cambios inmediatos en Railway.
+    """
+    raw = os.getenv("OWNER_USER_IDS", "").strip()
+    if not raw:
+        raw = os.getenv("OWNER_USER_ID", "").strip()
+
+    result: set[int] = set()
+    for part in re.split(r"[;,\s]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value > 0:
+            result.add(value)
+
+    if result:
+        return result
+
+    if len(ADMIN_USER_IDS) == 1:
+        return set(ADMIN_USER_IDS)
+
+    return set()
+
+
+OWNER_USER_IDS = _load_owner_user_ids()
 
 TIMEZONE_NAME = os.getenv("BOT_TIMEZONE", "America/Santiago").strip() or "America/Santiago"
 
@@ -452,6 +488,39 @@ FORECAST_MESSAGES = [
     "😎 El futuro está parcialmente nublado, pero Pecos recomienda seguir igual.",
 ]
 
+MELERIX_FUN_MESSAGES = [
+    "🤠 Melerix fue mencionado. Pecos ajusta el sombrero y revisa que el pueblo siga en pie.",
+    "👀 ¿Melerix? Pecos no acusa a nadie... pero ya está mirando alrededor.",
+    "🌵 Nombre detectado: Melerix. Los cactus han sido puestos en alerta preventiva.",
+    "📡 Reporte desde los United States: Melerix apareció en frecuencia. Pecos mantiene vigilancia.",
+    "😂 Otra vez salió Melerix en la conversación. Pecos sospecha que esto viene con historia incluida.",
+    "⭐ Sheriff Pecos registra oficialmente una mención a Melerix. Continúen bajo su propio riesgo.",
+    "🦅 Pecos escuchó ‘Melerix’ desde lejos. Algo me dice que el siguiente capítulo viene entretenido.",
+    "😎 Melerix detectado. Pecos ya puso música de duelo por si acaso.",
+    "🚨 Código Melerix activado. Nadie entre en pánico... todavía.",
+    "🌵 Cada vez que alguien dice Melerix, un cactus en Texas se pone nervioso.",
+    "🤨 Pecos oyó Melerix y levantó una ceja. Eso normalmente significa que viene anécdota.",
+    "🎯 Melerix en el radar. Pecos no dispara conclusiones... pero tampoco guarda el revólver.",
+    "🚂 Melerix volvió a pasar por la estación. Pecos espera que esta vez traiga boleto.",
+    "🕵️ Melerix fue nombrado. Pecos abre expediente, sirve café y espera los detalles.",
+    "🔔 Ding ding... mención a Melerix detectada. Pecos declara oficialmente iniciado el episodio.",
+    "🤖 Sistema Pecos: palabra Melerix recibida. Humor automático cargado al 100%.",
+    "🎬 Melerix apareció en el guion. Pecos pide palomitas antes de continuar.",
+    "🛂 Control fronterizo: Melerix acaba de cruzar la conversación. Documentos, por favor. 😎",
+    "🦗 Dijeron Melerix y hasta los grillos dejaron de cantar para escuchar.",
+    "☕ Melerix fue mencionado. Pecos recomienda café; estas historias rara vez son cortas.",
+    "🐎 Melerix entró cabalgando en la conversación. Pecos todavía no sabe si saludar o cubrirse.",
+    "📻 Señal clara y fuerte: Melerix. Pecos confirma recepción y ligera preocupación humorística.",
+    "🌵 Pecos no sabe qué hizo Melerix esta vez, pero el cactus ya pidió testigos.",
+    "😏 Melerix... ese nombre tiene más temporadas que una serie. Pecos sigue atento.",
+    "⭐ Melerix mencionado. Pecos anota: ‘posible material para leyenda del pueblo’.",
+    "🦅 Si Melerix fuera una frecuencia, Pecos ya la tendría guardada en favoritos.",
+    "🤠 Pecos escuchó Melerix. Nadie dijo ‘problema’, pero el sombrero se acomodó solo.",
+    "😂 Melerix en conversación: Pecos activa protocolo científico de mirar y esperar qué pasa.",
+    "📡 Mensaje recibido: Melerix. Respuesta de Pecos: esto promete.",
+    "🌵 Melerix otra vez en boca del pueblo. Pecos oficialmente se declara curioso.",
+]
+
 SILENCE_MESSAGES = [
     "🤠 ¿Qué pasó por aquí? Pecos escucha hasta los grillos. Ya van {horas} horas de silencio.",
     "🌵 Tanto silencio que Pecos ya empezó a conversar con un cactus. Marcador actual: {horas} horas.",
@@ -625,6 +694,14 @@ class Database:
                 probability INTEGER NOT NULL DEFAULT 35,
                 created_by INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS fun_keyword_usage (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL COLLATE NOCASE,
+                first_used_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, user_id, keyword)
             );
 
             CREATE TABLE IF NOT EXISTS group_memories (
@@ -1034,6 +1111,32 @@ class Database:
             self.conn.commit()
         return unique_count, hash_count
 
+    def claim_fun_keyword_once(
+        self,
+        chat_id: int,
+        user_id: int,
+        keyword: str,
+    ) -> bool:
+        """
+        Devuelve True solo la primera vez que ese usuario usa la palabra clave
+        en ese grupo. Persiste en SQLite y sobrevive a redeploys/reinicios.
+        """
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO fun_keyword_usage(
+                    chat_id, user_id, keyword, first_used_at
+                )
+                VALUES(?, ?, ?, ?)
+                """,
+                (chat_id, user_id, keyword.casefold(), now),
+            )
+            inserted = self.conn.total_changes > before
+            self.conn.commit()
+        return inserted
+
     def add_jokes(self, entries: list[tuple[str, int, str]], created_by: int) -> int:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         added = 0
@@ -1421,6 +1524,10 @@ db = Database(DB_PATH)
 
 def is_admin(user_id: int | None) -> bool:
     return bool(user_id and user_id in ADMIN_USER_IDS)
+
+
+def is_owner(user_id: int | None) -> bool:
+    return bool(user_id and user_id in OWNER_USER_IDS)
 
 
 def display_name(message: Message) -> str:
@@ -4068,6 +4175,49 @@ async def handle_new_members(
     return True
 
 
+async def handle_melerix_fun(message: Message) -> bool:
+    """
+    Broma especial para la palabra clave Melerix.
+
+    - Cada usuario normal obtiene UNA sola respuesta por grupo, para evitar abuso.
+    - Los usos posteriores del mismo usuario se ignoran silenciosamente.
+    - El/los OWNER_USER_IDS pueden activar la broma todas las veces que quieran.
+    - El control de uso queda persistido en SQLite.
+    """
+    text_value = message.text or message.caption or ""
+    if not text_value or not message.from_user or message.from_user.is_bot:
+        return False
+
+    normalized = normalize_intent(text_value)
+    if not re.search(r"(?<!\w)melerix(?!\w)", normalized):
+        return False
+
+    user_id = int(message.from_user.id)
+
+    if not is_owner(user_id):
+        first_use = db.claim_fun_keyword_once(
+            message.chat_id,
+            user_id,
+            "melerix",
+        )
+        if not first_use:
+            # Silencio intencional: el usuario ya consumió su única respuesta.
+            return False
+
+    await message.reply_text(
+        choose_random(
+            "melerix_fun",
+            MELERIX_FUN_MESSAGES,
+            display_name(message),
+        )
+    )
+
+    db.add_history(
+        f"BROMA MELERIX | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
 async def handle_internal_joke(message: Message) -> bool:
     text_value = message.text or message.caption or ""
     if not text_value:
@@ -4500,6 +4650,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Usuario recién ingresado que pregunta antes de revisar reglas/archivos.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_new_member_question(message, context):
+            return
+
+    # Broma especial Melerix: una sola respuesta persistente por usuario.
+    # El propietario de Pecos queda exento del límite.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        if await handle_melerix_fun(message):
             return
 
     # Fase 2: aprende respuestas explícitas a preguntas ya registradas y
