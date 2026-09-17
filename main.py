@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.4-vhf-uhf-joke"
+VERSION = "2.8.5-smart-farewells"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -703,6 +703,22 @@ FAREWELLS = [
     "⭐ Que descanses, {usuario}. Pecos mantiene un ojo puesto en el chat.",
     "🦅 Nos vemos pronto, {usuario}. Pecos te vio llegar y ahora te ve partir.",
     "🎸 See you, {usuario}. Pecos queda por aquí con la música encendida.",
+]
+
+COLLECTIVE_FAREWELLS = [
+    "🤠 Buenas noches, {usuario}. Pecos queda de guardia mientras el pueblo descansa.",
+    "🌙 Que descanses, {usuario}. Pecos baja el volumen de la radio, pero deja una oreja en la frecuencia.",
+    "👋 Hasta la próxima, {usuario}. Pecos cuida el saloon hasta que vuelva la tropa.",
+    "⭐ Buen descanso, {usuario}. Mañana seguimos desenredando cables y misterios.",
+    "🦅 Nos vemos, {usuario}. Pecos apaga una luz, pero no pierde de vista el territorio.",
+    "😎 Bye, {usuario}. Que descanse el pueblo; Pecos se queda haciendo la última ronda.",
+]
+
+SLEEP_FAREWELLS = [
+    "😴 Puede ser, {usuario}. Pecos cuelga el sombrero un rato… pero deja una oreja en la frecuencia. 😂",
+    "🌙 Buena idea, {usuario}. Pecos apaga la lámpara del saloon… por ahora. 😂",
+    "🤠 Está bien, partner {usuario}. Si preguntan por Pecos, diles que está calibrando los párpados. 😴",
+    "🌵 Pecos ya iba a dormir, {usuario}; alguien tiene que vigilar que no conviertan un VHF en UHF mientras descansa. 😂",
 ]
 
 
@@ -5860,6 +5876,76 @@ async def handle_special_daily_user_greeting(
     return True
 
 
+async def handle_collective_farewell(message: Message) -> bool:
+    """
+    Responde despedidas naturales dirigidas al grupo aunque Pecos no sea
+    mencionado explícitamente. Evita intervenir si el mismo mensaje contiene
+    una consulta técnica real.
+
+    Ejemplos:
+    - "Bye señores"
+    - "Buenas noches muchachos"
+    - "Hasta mañana amigos"
+    - "Que descansen todos"
+    """
+    if not message.text:
+        return False
+
+    normalized = normalize_intent(message.text).strip()
+
+    # Las despedidas dirigidas expresamente a Pecos las maneja handle_social().
+    if re.search(r"\b(pecos|peco)\b", normalized):
+        return False
+
+    # No cortar una consulta técnica que empieza o termina con una cortesía.
+    if technical_archive_terms(message.text):
+        return False
+
+    words = normalized.split()
+    short_message = len(words) <= 18
+
+    explicit_farewell = (
+        bool(re.search(r"\b(chao|chau|adios|bye)\b", normalized))
+        or "hasta luego" in normalized
+        or "hasta manana" in normalized
+        or "hasta pronto" in normalized
+        or "hasta la proxima" in normalized
+        or "nos vemos" in normalized
+        or "me voy" in normalized
+        or "que descansen" in normalized
+    )
+
+    collective_target = (
+        bool(re.search(
+            r"\b(muchachos|chicos|amigos|senores|gente|grupo|todos|companeros|colegas|caballeros)\b",
+            normalized,
+        ))
+        or "a todos" in normalized
+    )
+
+    # "Buenas noches" es ambigua: solo la tratamos como despedida colectiva
+    # cuando es breve y está dirigida claramente al grupo.
+    collective_good_night = (
+        "buenas noches" in normalized
+        and collective_target
+        and short_message
+    )
+
+    if not (explicit_farewell or collective_good_night):
+        return False
+
+    usuario = display_name(message)
+    increment_user_metric(message, "greeting_count")
+    await message.reply_text(
+        choose_random(
+            "collective_farewell",
+            COLLECTIVE_FAREWELLS,
+            usuario,
+        )
+    )
+    return True
+
+
 async def handle_collective_greeting(message: Message) -> bool:
     """
     Responde a saludos claramente dirigidos a todo el grupo, aunque Pecos
@@ -5942,8 +6028,20 @@ async def handle_social(message: Message) -> bool:
 
     usuario = display_name(message)
 
+    sleep_farewell = (
+        "ve a dormir" in normalized
+        or "vete a dormir" in normalized
+        or "anda a dormir" in normalized
+        or "mejor duerme" in normalized
+        or "a dormir pecos" in normalized
+        or "a dormir peco" in normalized
+        or "duerme pecos" in normalized
+        or "duerme peco" in normalized
+    )
+
     is_farewell = (
-        bool(re.search(r"\b(chao|chau|adios|bye)\b", normalized))
+        sleep_farewell
+        or bool(re.search(r"\b(chao|chau|adios|bye)\b", normalized))
         or "hasta luego" in normalized
         or "hasta manana" in normalized
         or "nos vemos" in normalized
@@ -5955,7 +6053,10 @@ async def handle_social(message: Message) -> bool:
 
     if is_farewell:
         increment_user_metric(message, "greeting_count")
-        await message.reply_text(choose_random("farewell", FAREWELLS, usuario))
+        if sleep_farewell:
+            await message.reply_text(choose_random("sleep_farewell", SLEEP_FAREWELLS, usuario))
+        else:
+            await message.reply_text(choose_random("farewell", FAREWELLS, usuario))
         return True
 
     helpful_score = 0
@@ -6195,6 +6296,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_collective_farewell(message):
+            return
+
         if await handle_collective_greeting(message):
             return
 
