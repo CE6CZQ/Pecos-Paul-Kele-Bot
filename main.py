@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.5-smart-farewells"
+VERSION = "2.8.6-explicit-bot-greetings"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -456,6 +456,32 @@ NEW_USER_RULE_MESSAGES = [
     "🦅 Pecos vio todo desde arriba, {usuario}: entrada al grupo, cero escala en las reglas y directo a preguntar. Vuelve un par de pasos y revisa los archivos. 🤠",
     "📡 Alerta desde los United States: usuario nuevo preguntando antes de revisar las reglas. {usuario}, busca primero en los archivos si no quieres un duelo con Pecos. Spoiler: Pecos viene entrenando. 😎",
 ]
+
+DIRECT_PECOS_GREETINGS = [
+    "🤠 ¡Saludos, {usuario}! Pecos recibió su saludo fuerte y claro. Gracias por incluirme directamente, partner. 📡",
+    "😎 ¡Presente, {usuario}! Esta vez Pecos sí apareció en la lista. Saludo recibido y devuelto. 🤠",
+    "📡 ¡Gracias por el saludo, {usuario}! Mención recibida sin interferencias. Pecos también te saluda.",
+    "🌵 ¡Saludos, {usuario}! Pecos agradece que se acordaran del sheriff del grupo. 😄",
+]
+
+DIRECT_PECOS_MORNING_GREETINGS = [
+    "🌞 ¡Buenos días, {usuario}! Pecos recibió el saludo fuerte y claro. Gracias por incluirme, partner. 🤠",
+    "☕ ¡Buenos días, {usuario}! Esta vez Pecos sí estaba en la lista. Saludo recibido y café en mano. 😎",
+    "📡 ¡Muy buenos días, {usuario}! Mención recibida sin interferencias. Pecos también te saluda.",
+]
+
+DIRECT_PECOS_AFTERNOON_GREETINGS = [
+    "☀️ ¡Buenas tardes, {usuario}! Pecos recibió su saludo fuerte y claro. Gracias por incluirme. 🤠",
+    "📡 ¡Buenas tardes, {usuario}! Esta vez Pecos sí apareció en la lista. Saludo recibido y devuelto.",
+    "😎 ¡Muy buenas tardes, {usuario}! Pecos presente y agradecido por la mención, partner.",
+]
+
+DIRECT_PECOS_NIGHT_GREETINGS = [
+    "🌙 ¡Buenas noches, {usuario}! Pecos recibió el saludo y confirma presencia. Gracias por incluirme. 🤠",
+    "⭐ ¡Buenas noches, {usuario}! Esta vez Pecos sí estaba nombrado. Saludo recibido y devuelto.",
+    "📡 ¡Muy buenas noches, {usuario}! Mención recibida fuerte y clara. Pecos también te saluda.",
+]
+
 
 GENERAL_GREETINGS = [
     "🤠 ¡Hola, {usuario}! Pecos Paul Kele reportándose desde los United States. ¿Cómo anda todo por ahí?",
@@ -2105,6 +2131,24 @@ def normalize_intent(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
 
 
+PECOS_USERNAME_ALIASES = {"pecos_paul_kele_bot"}
+
+
+def text_mentions_pecos(text_value: str) -> bool:
+    """
+    Detecta menciones explícitas a Pecos, incluyendo el @username de Telegram.
+    El guion bajo es carácter de palabra para regex, por eso una búsqueda
+    simple con \bpecos\b no reconoce bien @Pecos_Paul_Kele_Bot.
+    """
+    normalized = normalize_intent(text_value or "").lower()
+
+    if re.search(r"(?<!\w)(?:pecos|peco)(?!\w)", normalized):
+        return True
+
+    compact = normalized.lstrip("@")
+    return any(alias and alias in compact for alias in PECOS_USERNAME_ALIASES)
+
+
 def choose_random(category: str, choices: list[str], usuario: str) -> str:
     with _random_lock:
         if len(choices) == 1:
@@ -2175,7 +2219,7 @@ def is_repeated_question_candidate(message: Message) -> bool:
     normalized = normalize_intent(text_value)
 
     # Las preguntas explícitas a Pecos siguen su flujo conversacional normal.
-    if re.search(r"\b(pecos|peco)\b", normalized):
+    if text_mentions_pecos(text_value):
         return False
 
     if not looks_like_question(text_value):
@@ -2828,7 +2872,7 @@ def archive_query_needs_target(query: str, terms: list[str] | None = None) -> bo
 
 def archive_query_from_natural_text(text_value: str) -> str | None:
     normalized = normalize_intent(text_value or "").strip()
-    if not re.search(r"\b(pecos|peco)\b", normalized):
+    if not text_mentions_pecos(text_value):
         return None
 
     terms = extract_archive_terms(text_value)
@@ -3028,7 +3072,7 @@ async def maybe_offer_related_files(
 ) -> bool:
     if not message.text:
         return False
-    if re.search(r"\b(pecos|peco)\b", normalize_intent(message.text)):
+    if text_mentions_pecos(message.text):
         return False
     if len(message.text) > 350:
         return False
@@ -5359,9 +5403,7 @@ async def handle_identity(
     normalized = normalize_intent(message.text)
 
     # La pregunta debe estar realmente dirigida a Pecos.
-    mentions_pecos = bool(
-        re.search(r"\b(pecos|peco)\b", normalized)
-    )
+    mentions_pecos = text_mentions_pecos(message.text)
 
     mentions_bot = (
         bool(re.search(r"\b(bot|robot)\b", normalized))
@@ -5665,7 +5707,7 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     normalized = normalize_intent(message.text).strip()
 
-    if not re.search(r"\b(pecos|peco)\b", normalized):
+    if not text_mentions_pecos(message.text):
         return False
 
     usuario = display_name(message)
@@ -5894,7 +5936,7 @@ async def handle_collective_farewell(message: Message) -> bool:
     normalized = normalize_intent(message.text).strip()
 
     # Las despedidas dirigidas expresamente a Pecos las maneja handle_social().
-    if re.search(r"\b(pecos|peco)\b", normalized):
+    if text_mentions_pecos(message.text):
         return False
 
     # No cortar una consulta técnica que empieza o termina con una cortesía.
@@ -5967,7 +6009,7 @@ async def handle_collective_greeting(message: Message) -> bool:
     normalized = normalize_intent(message.text).strip()
 
     # Si Pecos fue nombrado, el saludo ya está dirigido a él de forma explícita.
-    if re.search(r"\b(pecos|peco)\b", normalized):
+    if text_mentions_pecos(message.text):
         return False
 
     greeting_signal = (
@@ -6018,7 +6060,7 @@ async def handle_social(message: Message) -> bool:
         return False
 
     normalized = normalize_intent(message.text)
-    if not re.search(r"\b(pecos|peco)\b", normalized):
+    if not text_mentions_pecos(message.text):
         return False
 
     # Una petición técnica directa ("Pecos CPS MOTOTRBO?", etc.) pertenece
@@ -6027,6 +6069,7 @@ async def handle_social(message: Message) -> bool:
         return False
 
     usuario = display_name(message)
+    explicit_pecos_greeting = text_mentions_pecos(message.text)
 
     sleep_farewell = (
         "ve a dormir" in normalized
@@ -6065,7 +6108,11 @@ async def handle_social(message: Message) -> bool:
 
     if "buenos dias" in normalized or "buen dia" in normalized:
         increment_user_metric(message, "greeting_count")
-        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+        if explicit_pecos_greeting:
+            await message.reply_text(
+                choose_random("direct_pecos_morning", DIRECT_PECOS_MORNING_GREETINGS, usuario)
+            )
+        elif helpful_score >= 3 and random.randint(1, 100) <= 45:
             await message.reply_text(choose_random("veteran_morning", VETERAN_GREETINGS, usuario))
         else:
             await message.reply_text(choose_random("morning", MORNING_GREETINGS, usuario))
@@ -6073,7 +6120,11 @@ async def handle_social(message: Message) -> bool:
 
     if "buenas tardes" in normalized:
         increment_user_metric(message, "greeting_count")
-        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+        if explicit_pecos_greeting:
+            await message.reply_text(
+                choose_random("direct_pecos_afternoon", DIRECT_PECOS_AFTERNOON_GREETINGS, usuario)
+            )
+        elif helpful_score >= 3 and random.randint(1, 100) <= 45:
             await message.reply_text(choose_random("veteran_afternoon", VETERAN_GREETINGS, usuario))
         else:
             await message.reply_text(choose_random("afternoon", AFTERNOON_GREETINGS, usuario))
@@ -6081,7 +6132,11 @@ async def handle_social(message: Message) -> bool:
 
     if "buenas noches" in normalized:
         increment_user_metric(message, "greeting_count")
-        if helpful_score >= 3 and random.randint(1, 100) <= 45:
+        if explicit_pecos_greeting:
+            await message.reply_text(
+                choose_random("direct_pecos_night", DIRECT_PECOS_NIGHT_GREETINGS, usuario)
+            )
+        elif helpful_score >= 3 and random.randint(1, 100) <= 45:
             await message.reply_text(choose_random("veteran_night", VETERAN_GREETINGS, usuario))
         else:
             await message.reply_text(choose_random("night", NIGHT_GREETINGS, usuario))
@@ -6089,7 +6144,11 @@ async def handle_social(message: Message) -> bool:
 
     if re.search(r"\b(hola|hello|hey|holi|saludos|buenas)\b", normalized):
         increment_user_metric(message, "greeting_count")
-        if helpful_score >= 3 and random.randint(1, 100) <= 50:
+        if explicit_pecos_greeting:
+            await message.reply_text(
+                choose_random("direct_pecos_general", DIRECT_PECOS_GREETINGS, usuario)
+            )
+        elif helpful_score >= 3 and random.randint(1, 100) <= 50:
             await message.reply_text(choose_random("veteran_general", VETERAN_GREETINGS, usuario))
         else:
             await message.reply_text(choose_random("general", GENERAL_GREETINGS, usuario))
@@ -6513,6 +6572,9 @@ async def post_init(application: Application) -> None:
     application.bot_data["daily_task"] = asyncio.create_task(daily_loop(application))
 
     me = await application.bot.get_me()
+    if me.username:
+        PECOS_USERNAME_ALIASES.add(normalize_intent(me.username).lower().lstrip("@"))
+
     log.info(
         "%s %s conectado como @%s | Admin IDs: %s | Zona: %s | DB: %s | API: %s",
         APP_NAME,
