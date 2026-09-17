@@ -64,7 +64,12 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.7.4-two-group-lock"
+VERSION = "2.8.0-history-memory-smart-archive"
+HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
+HISTORY_MEMORY_GROUP_IDS = {
+    int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
+    if x.strip()
+}
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -884,6 +889,71 @@ class Database:
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, message_id, notice_type)
             );
+            
+
+            -- Memoria histórica de conversaciones. Está separada de file_fingerprints
+            -- para que la integración no altere la lógica SHA-256 ni duplicados.
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                date_utc TEXT NOT NULL,
+                edit_date_utc TEXT NOT NULL DEFAULT '',
+                sender_id INTEGER NOT NULL DEFAULT 0,
+                sender_name TEXT NOT NULL DEFAULT '',
+                sender_username TEXT NOT NULL DEFAULT '',
+                reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                message_link TEXT NOT NULL DEFAULT '',
+                media_type TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(chat_id, message_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conv_messages_chat_date
+                ON conversation_messages(chat_id, date_utc);
+            CREATE INDEX IF NOT EXISTS idx_conv_messages_reply
+                ON conversation_messages(chat_id, reply_to_message_id);
+
+            CREATE TABLE IF NOT EXISTS conversation_classifications (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                primary_label TEXT NOT NULL,
+                is_question INTEGER NOT NULL DEFAULT 0,
+                is_request INTEGER NOT NULL DEFAULT 0,
+                is_answer INTEGER NOT NULL DEFAULT 0,
+                is_helpful INTEGER NOT NULL DEFAULT 0,
+                is_closure INTEGER NOT NULL DEFAULT 0,
+                is_confirmed_solution INTEGER NOT NULL DEFAULT 0,
+                question_score INTEGER NOT NULL DEFAULT 0,
+                request_score INTEGER NOT NULL DEFAULT 0,
+                answer_score INTEGER NOT NULL DEFAULT 0,
+                help_score INTEGER NOT NULL DEFAULT 0,
+                closure_score INTEGER NOT NULL DEFAULT 0,
+                parent_message_id INTEGER NOT NULL DEFAULT 0,
+                root_question_id INTEGER NOT NULL DEFAULT 0,
+                classification_reason TEXT NOT NULL DEFAULT '',
+                classified_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conv_class_label
+                ON conversation_classifications(chat_id, primary_label);
+            CREATE INDEX IF NOT EXISTS idx_conv_class_root
+                ON conversation_classifications(chat_id, root_question_id);
+
+            CREATE TABLE IF NOT EXISTS conversation_qa_pairs (
+                chat_id INTEGER NOT NULL,
+                question_message_id INTEGER NOT NULL,
+                answer_message_id INTEGER NOT NULL,
+                confirmation_message_id INTEGER NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(chat_id, question_message_id, answer_message_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conv_qa_status
+                ON conversation_qa_pairs(chat_id, status);
             """
         )
         self.conn.commit()
@@ -1571,6 +1641,265 @@ class Database:
             self.conn.commit()
         return inserted
 
+
+    def store_conversation_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        date_utc: str,
+        edit_date_utc: str,
+        sender_id: int,
+        sender_name: str,
+        sender_username: str,
+        reply_to_message_id: int,
+        text_value: str,
+        normalized_text: str,
+        message_link: str,
+        media_type: str,
+    ) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO conversation_messages(
+                    chat_id, message_id, date_utc, edit_date_utc,
+                    sender_id, sender_name, sender_username,
+                    reply_to_message_id, text, normalized_text,
+                    message_link, media_type
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    edit_date_utc=excluded.edit_date_utc,
+                    sender_name=excluded.sender_name,
+                    sender_username=excluded.sender_username,
+                    reply_to_message_id=excluded.reply_to_message_id,
+                    text=excluded.text,
+                    normalized_text=excluded.normalized_text,
+                    message_link=excluded.message_link,
+                    media_type=excluded.media_type
+                """,
+                (
+                    chat_id, message_id, date_utc, edit_date_utc,
+                    sender_id, sender_name, sender_username,
+                    reply_to_message_id, text_value, normalized_text,
+                    message_link, media_type,
+                ),
+            )
+            self.conn.commit()
+
+    def get_conversation_classification(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT *
+                FROM conversation_classifications
+                WHERE chat_id=? AND message_id=?
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+
+    def get_conversation_message(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT *
+                FROM conversation_messages
+                WHERE chat_id=? AND message_id=?
+                """,
+                (chat_id, message_id),
+            ).fetchone()
+
+    def upsert_conversation_classification(
+        self,
+        chat_id: int,
+        message_id: int,
+        primary_label: str,
+        is_question: int,
+        is_request: int,
+        is_answer: int,
+        is_helpful: int,
+        is_closure: int,
+        is_confirmed_solution: int,
+        question_score: int,
+        request_score: int,
+        answer_score: int,
+        help_score: int,
+        closure_score: int,
+        parent_message_id: int,
+        root_question_id: int,
+        reason: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO conversation_classifications(
+                    chat_id, message_id, primary_label,
+                    is_question, is_request, is_answer, is_helpful, is_closure,
+                    is_confirmed_solution,
+                    question_score, request_score, answer_score,
+                    help_score, closure_score,
+                    parent_message_id, root_question_id,
+                    classification_reason, classified_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    primary_label=excluded.primary_label,
+                    is_question=excluded.is_question,
+                    is_request=excluded.is_request,
+                    is_answer=excluded.is_answer,
+                    is_helpful=excluded.is_helpful,
+                    is_closure=excluded.is_closure,
+                    is_confirmed_solution=excluded.is_confirmed_solution,
+                    question_score=excluded.question_score,
+                    request_score=excluded.request_score,
+                    answer_score=excluded.answer_score,
+                    help_score=excluded.help_score,
+                    closure_score=excluded.closure_score,
+                    parent_message_id=excluded.parent_message_id,
+                    root_question_id=excluded.root_question_id,
+                    classification_reason=excluded.classification_reason,
+                    classified_at=excluded.classified_at
+                """,
+                (
+                    chat_id, message_id, primary_label,
+                    is_question, is_request, is_answer, is_helpful, is_closure,
+                    is_confirmed_solution,
+                    question_score, request_score, answer_score,
+                    help_score, closure_score,
+                    parent_message_id, root_question_id,
+                    reason[:1200], now,
+                ),
+            )
+            self.conn.commit()
+
+    def upsert_conversation_pair(
+        self,
+        chat_id: int,
+        question_message_id: int,
+        answer_message_id: int,
+        confirmation_message_id: int,
+        confidence: float,
+        status: str,
+        reason: str,
+    ) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO conversation_qa_pairs(
+                    chat_id, question_message_id, answer_message_id,
+                    confirmation_message_id, confidence, status, reason
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, question_message_id, answer_message_id)
+                DO UPDATE SET
+                    confirmation_message_id=excluded.confirmation_message_id,
+                    confidence=excluded.confidence,
+                    status=excluded.status,
+                    reason=excluded.reason
+                """,
+                (
+                    chat_id, question_message_id, answer_message_id,
+                    confirmation_message_id, confidence, status, reason[:800],
+                ),
+            )
+            self.conn.commit()
+
+    def find_pair_by_answer(
+        self,
+        chat_id: int,
+        answer_message_id: int,
+    ) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT *
+                FROM conversation_qa_pairs
+                WHERE chat_id=? AND answer_message_id=?
+                ORDER BY confidence DESC
+                LIMIT 1
+                """,
+                (chat_id, answer_message_id),
+            ).fetchone()
+
+    def search_conversation_history(
+        self,
+        chat_id: int,
+        terms: list[str],
+        model_anchor: str = "",
+        limit: int = 8,
+    ) -> list[sqlite3.Row]:
+        if not terms and not model_anchor:
+            return []
+
+        with self.lock:
+            params: list[object] = [chat_id]
+
+            # Si la consulta contiene un modelo fuerte (DEP450, DM4601e,
+            # TK-2312, etc.), ese modelo es un filtro obligatorio. Se prueban
+            # variantes habituales de separador sin aplicar REPLACE() a las
+            # 113 mil filas, para mantener la búsqueda rápida en Railway.
+            if model_anchor:
+                anchor_patterns = [f"%{model_anchor}%"]
+                match = re.fullmatch(r"([a-z]+)(\d.*)", model_anchor)
+                if match:
+                    prefix, rest = match.groups()
+                    for sep in (" ", "-", "_", ".", "/"):
+                        pattern = f"%{prefix}{sep}{rest}%"
+                        if pattern not in anchor_patterns:
+                            anchor_patterns.append(pattern)
+
+                where_sql = " OR ".join(
+                    "m.normalized_text LIKE ?" for _ in anchor_patterns
+                )
+                params.extend(anchor_patterns)
+            else:
+                where_parts: list[str] = []
+                for term in terms:
+                    where_parts.append("m.normalized_text LIKE ?")
+                    params.append(f"%{term}%")
+                where_sql = " OR ".join(where_parts)
+
+            rows = self.conn.execute(
+                f"""
+                SELECT DISTINCT
+                    m.message_id, m.date_utc, m.sender_name, m.sender_username,
+                    m.text, m.message_link,
+                    c.primary_label, c.root_question_id,
+                    q.status AS pair_status, q.confidence AS pair_confidence,
+                    q.question_message_id, q.answer_message_id
+                FROM conversation_messages m
+                LEFT JOIN conversation_classifications c
+                  ON c.chat_id=m.chat_id AND c.message_id=m.message_id
+                LEFT JOIN conversation_qa_pairs q
+                  ON q.chat_id=m.chat_id
+                 AND (q.question_message_id=m.message_id OR q.answer_message_id=m.message_id)
+                WHERE m.chat_id=? AND ({where_sql})
+                ORDER BY
+                    CASE
+                        WHEN q.status='CONFIRMED' THEN 1
+                        WHEN c.primary_label='SOLUTION_CONFIRMED' THEN 2
+                        WHEN c.primary_label='HELP_PROBABLE' THEN 3
+                        WHEN c.primary_label='ANSWER' THEN 4
+                        WHEN c.primary_label='REQUEST_HELP' THEN 5
+                        WHEN c.primary_label='QUESTION' THEN 6
+                        ELSE 7
+                    END,
+                    COALESCE(q.confidence,0) DESC,
+                    m.message_id DESC
+                LIMIT ?
+                """,
+                params + [max(1, min(20, limit))],
+            ).fetchall()
+        return rows
+
     def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         with self.lock:
@@ -2019,9 +2348,57 @@ def archive_stem_for_similarity(file_name: str) -> str:
     return re.sub(r"\s+", " ", stem).strip()
 
 
+def archive_model_terms(text_value: str) -> list[str]:
+    """
+    Extrae modelos de radio escritos juntos o separados.
+
+    Ejemplos:
+    - EM200 -> em200
+    - PRO 5100 -> pro5100
+    - TK-2312 -> tk2312
+    - DM 4601e -> dm4601e
+    - XPR7550e -> xpr7550e
+
+    Se exige un prefijo de al menos dos letras y un bloque de al menos
+    tres dígitos para evitar convertir versiones como R40 o R05 en modelos.
+    """
+    normalized = normalize_intent(text_value or "")
+    models: list[str] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(
+        r"\b([a-z]{2,5})[\s._-]*(\d{3,5}[a-z]?)\b",
+        normalized,
+    ):
+        model = f"{match.group(1)}{match.group(2)}"
+        if model not in seen:
+            seen.add(model)
+            models.append(model)
+
+    return models[:6]
+
+
+def archive_name_matches_model(file_name: str, model: str) -> bool:
+    compact_name = re.sub(r"[^a-z0-9]", "", archive_normalized_name(file_name))
+    compact_model = re.sub(r"[^a-z0-9]", "", normalize_intent(model))
+    return bool(compact_model and compact_model in compact_name)
+
+
 def extract_archive_terms(text_value: str) -> list[str]:
     normalized = normalize_intent(text_value or "")
-    raw_tokens = re.findall(r"[a-z0-9][a-z0-9._+-]*", normalized)
+    models = archive_model_terms(normalized)
+
+    # Evita que un modelo separado como "PRO 5100" termine convertido en
+    # dos términos débiles ("pro" y "5100"). Se elimina esa secuencia
+    # del texto y luego se agregan los modelos canónicos al resultado.
+    text_without_models = normalized
+    text_without_models = re.sub(
+        r"\b[a-z]{2,5}[\s._-]*\d{3,5}[a-z]?\b",
+        " ",
+        text_without_models,
+    )
+
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9._+-]*", text_without_models)
     result: list[str] = []
     seen: set[str] = set()
 
@@ -2037,7 +2414,18 @@ def extract_archive_terms(text_value: str) -> list[str]:
             seen.add(token)
             result.append(token)
 
-    return result[:6]
+    for model in models:
+        if model not in seen:
+            seen.add(model)
+            result.append(model)
+
+    # Los términos técnicos primero; luego los modelos. Esto conserva CPS,
+    # firmware, driver, etc. sin perder ninguno de los modelos solicitados.
+    technical = [t for t in result if t in TECHNICAL_ARCHIVE_WORDS]
+    model_set = set(models)
+    model_items = [t for t in result if t in model_set]
+    other = [t for t in result if t not in set(technical) | model_set]
+    return (technical + model_items + other)[:8]
 
 
 def archive_search_score(file_name: str, terms: list[str]) -> float:
@@ -2083,14 +2471,32 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
     if not terms:
         return []
 
+    requested_models = archive_model_terms(query)
     ranked: list[tuple[float, sqlite3.Row]] = []
+
     for row in db.list_archive_fingerprints(chat_id):
         file_name = str(row["file_name"] or "")
         if not archive_file_allowed(file_name):
             continue
+
+        # Si el usuario indicó uno o más modelos, una coincidencia genérica
+        # por "CPS", "firmware" o "driver" NO basta. El nombre del
+        # archivo debe contener al menos uno de los modelos pedidos.
+        # Esto impide, por ejemplo, ofrecer CPS de APX ante una consulta EM200.
+        matched_models = [
+            model for model in requested_models
+            if archive_name_matches_model(file_name, model)
+        ]
+        if requested_models and not matched_models:
+            continue
+
         score = archive_search_score(file_name, terms)
-        if score > 0:
-            ranked.append((score, row))
+        if score <= 0:
+            continue
+
+        # La coincidencia exacta de modelo domina la clasificación.
+        score += 12.0 * len(matched_models)
+        ranked.append((score, row))
 
     ranked.sort(key=lambda pair: (pair[0], int(pair[1]["message_id"])), reverse=True)
     return [row for _, row in ranked[:max(1, min(12, limit))]]
@@ -2177,14 +2583,13 @@ def technical_archive_terms(text_value: str) -> list[str]:
     if not terms:
         return []
 
-    model_terms = [
-        term for term in terms
-        if any(ch.isalpha() for ch in term) and any(ch.isdigit() for ch in term)
-    ]
+    model_terms = archive_model_terms(text_value)
     technical_words = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
 
     if model_terms:
-        return (technical_words + model_terms)[:4]
+        # Conserva todos los modelos detectados (hasta cuatro) y no solo el
+        # primero. Así "CPS para EM200 y PRO 5100" busca ambos equipos.
+        return (technical_words + model_terms)[:6]
 
     # Sin un modelo alfanumérico exigimos al menos dos pistas técnicas para no invadir.
     if len(technical_words) >= 2:
@@ -2237,10 +2642,24 @@ async def send_archive_search_results(
         )
         return True
 
+    requested_models = archive_model_terms(query)
+    found_models = {
+        model
+        for model in requested_models
+        if any(archive_name_matches_model(str(row["file_name"] or ""), model) for row in rows)
+    }
+    missing_models = [model.upper() for model in requested_models if model not in found_models]
+
     lines = [
         f"📚 {usuario}, Pecos encontró {len(rows)} coincidencia(s) para «{' '.join(terms)}»:"
     ]
     lines.extend(archive_result_lines(chat, rows))
+    if missing_models:
+        lines.append(
+            "\n🔎 También detecté " + ", ".join(missing_models)
+            + ", pero no encontré un archivo que pueda asociar con suficiente seguridad "
+              "a " + ("ese modelo" if len(missing_models) == 1 else "esos modelos") + "."
+        )
     lines.append("\n🤠 Pecos buscó por nombre y metadatos guardados; no abrió ni extrajo los RAR/ZIP/7Z.")
 
     await context.bot.send_message(chat_id=chat.id, text="\n\n".join(lines))
@@ -2288,10 +2707,24 @@ async def maybe_offer_related_files(
     if len(rows) == 1 and not has_model:
         return False
 
+    requested_models = archive_model_terms(message.text)
+    found_models = {
+        model
+        for model in requested_models
+        if any(archive_name_matches_model(str(row["file_name"] or ""), model) for row in rows)
+    }
+    missing_models = [model.upper() for model in requested_models if model not in found_models]
+
     lines = [
         f"👀 Pecos levantó una oreja: encontré {len(rows)} archivo(s) relacionado(s) con «{' '.join(terms)}»."
     ]
     lines.extend(archive_result_lines(message.chat, rows, max_items=3))
+    if missing_models:
+        lines.append(
+            "\n🔎 También detecté " + ", ".join(missing_models)
+            + ", pero no encontré un archivo que pueda asociar con suficiente seguridad "
+              "a " + ("ese modelo" if len(missing_models) == 1 else "esos modelos") + "."
+        )
     lines.append(f"\n📡 Para revisar más: «Pecos busca {' '.join(terms)}». ")
 
     await context.bot.send_message(chat_id=message.chat_id, text="\n\n".join(lines))
@@ -2411,6 +2844,341 @@ async def handle_file_detective(
         f"DETECTIVE ARCHIVO | {notice_type} | nuevo={file_name} relacionado={related_name}"
     )
     return True
+
+
+
+HISTORY_SUCCESS_PATTERNS = (
+    r"\bme funcion[oó]\b", r"\bya funcion[oó]\b", r"\bfuncion[oó] perfecto\b",
+    r"\bfunciona perfecto\b", r"\bqued[oó] funcionando\b", r"\bqued[oó] listo\b",
+    r"\bsolucionad[oa]\b", r"\bresuelto\b", r"\bera eso\b", r"\bera justo eso\b",
+    r"\bit works\b", r"\bit worked\b", r"\bthat worked\b", r"\bworking now\b",
+    r"\bsolved\b", r"\bfixed\b", r"\beverything worked out\b",
+)
+
+HISTORY_NEGATIVE_PATTERNS = (
+    r"\bno me funcion", r"\bno funcion[oó]\b", r"\bno funciona\b", r"\bno sirve\b",
+    r"\bno ayud", r"\bno pude\b", r"\bno puedo\b",
+    r"\bsigue (?:igual|apareciendo|fallando)\b",
+    r"\bmismo (?:error|problema)\b", r"\bdoesn['’]?t help\b",
+    r"\bdidn['’]?t work\b", r"\bnot work\b", r"\bthanks anyway\b",
+    r"\bgracias de todos modos\b",
+)
+
+HISTORY_TRY_PATTERNS = (
+    r"\bvoy a (?:probar|intentar|buscar)\b", r"\blo voy a (?:probar|intentar)\b",
+    r"\bprobar[eé]\b", r"\bintentar[eé]\b", r"\bi['’]?ll try\b", r"\bwill try\b",
+)
+
+HISTORY_REQUEST_PATTERNS = (
+    r"\bbusco\b", r"\bbuscando\b", r"\bnecesito\b", r"\bme falta\b",
+    r"\balguien tiene\b", r"\balguien puede compartir\b",
+    r"\bme pueden pasar\b", r"\bme pueden enviar\b", r"\bnecesito ayuda\b",
+    r"\btengo un problema\b", r"\bno me funciona\b", r"\bi need\b",
+    r"\bi am looking for\b", r"\blooking for\b", r"\bdoes anyone have\b",
+    r"\bneed help\b", r"\bplease help\b",
+)
+
+HISTORY_HELP_PATTERNS = (
+    r"\busa\b", r"\butiliza\b", r"\bdebes\b", r"\btienes que\b", r"\bprueba\b",
+    r"\bintenta\b", r"\binstala\b", r"\bdescarga\b", r"\bconfigura\b",
+    r"\bcambia\b", r"\bactiva\b", r"\bdesactiva\b", r"\brevisa\b",
+    r"\bverifica\b", r"\bpuedes usar\b", r"\bte recomiendo\b", r"\bsolucion\b",
+    r"\buse\b", r"\byou need\b", r"\btry\b", r"\binstall\b", r"\bdownload\b",
+    r"\bcheck\b", r"\bsolution\b", r"\bworks with\b", r"\byou can use\b",
+)
+
+HISTORY_SEARCH_STOPWORDS = {
+    "a","al","algo","alguien","con","como","cual","cuando","de","del","donde",
+    "el","en","es","esta","este","esto","gracias","hola","la","las","lo","los",
+    "me","mi","no","para","pero","por","que","quien","se","si","su","tengo",
+    "un","una","y","ya","ayuda","ayudar","favor","busco","buscando","necesito",
+    "archivo","archivos","the","and","for","have","help","how","i","in","is","it",
+    "need","of","on","or","please","the","this","to","what","where","with","you",
+}
+
+HISTORY_MODEL_PREFIXES = {
+    "tk","xpr","dm","dp","dep","pd","gp","hp","apx","dgp","ic","icf",
+    "bf","uv","md","rd","cp","r","ft","vx",
+}
+
+
+def history_feedback_kind(text_value: str) -> str:
+    normalized = normalize_intent(text_value or "")
+    if any(re.search(p, normalized) for p in HISTORY_NEGATIVE_PATTERNS):
+        return "REJECTED"
+    if any(re.search(p, normalized) for p in HISTORY_SUCCESS_PATTERNS):
+        return "CONFIRMED"
+    if any(re.search(p, normalized) for p in HISTORY_TRY_PATTERNS):
+        return "WILL_TRY"
+    if re.search(r"\b(gracias|thanks|thank you|te agradezco|muchas gracias)\b", normalized):
+        return "ACKNOWLEDGED"
+    return ""
+
+
+def history_extract_search_terms(query: str) -> list[str]:
+    normalized = normalize_intent(query or "")
+    raw = re.findall(r"[a-z0-9_#+.\-]+", normalized)
+    out: list[str] = []
+    for token in raw:
+        token = token.strip(".-_")
+        if not token or token in HISTORY_SEARCH_STOPWORDS:
+            continue
+        if len(token) < 3 and not token.isdigit():
+            continue
+        if token not in out:
+            out.append(token)
+    return out[:10]
+
+
+def history_model_anchor(query: str) -> str:
+    normalized = normalize_intent(query or "")
+    tokens = re.findall(r"[a-z0-9]+(?:[-./][a-z0-9]+)*", normalized)
+    for token in tokens:
+        compact = re.sub(r"[^a-z0-9]", "", token)
+        if len(compact) >= 4 and re.search(r"[a-z]", compact) and re.search(r"\d", compact):
+            return compact
+    simple = re.findall(r"[a-z0-9]+", normalized)
+    for i in range(len(simple) - 1):
+        if simple[i] in HISTORY_MODEL_PREFIXES and re.fullmatch(r"\d+[a-z]?", simple[i + 1]):
+            return simple[i] + simple[i + 1]
+    return ""
+
+
+def history_message_media_type(message: Message) -> str:
+    if message.document:
+        return "document"
+    if message.photo:
+        return "photo"
+    if message.video:
+        return "video"
+    if message.audio:
+        return "audio"
+    if message.voice:
+        return "voice"
+    return ""
+
+
+def history_memory_enabled_for_chat(chat_id: int) -> bool:
+    return chat_id in HISTORY_MEMORY_GROUP_IDS
+
+
+async def learn_historical_memory(
+    message: Message,
+    *,
+    is_edited: bool = False,
+) -> None:
+    if not history_memory_enabled_for_chat(message.chat_id):
+        return
+
+    text_value = (message.text or message.caption or "").strip()
+    if not text_value:
+        return
+
+    user = message.from_user
+    sender_id = int(user.id) if user else 0
+    sender_name = display_name(message)
+    sender_username = (user.username or "") if user else ""
+    parent_id = int(message.reply_to_message.message_id) if message.reply_to_message else 0
+
+    try:
+        date_utc = message.date.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+    except Exception:
+        date_utc = datetime.now(ZoneInfo("UTC")).isoformat(timespec="seconds")
+
+    edit_date_utc = ""
+    if is_edited:
+        try:
+            edit_date_utc = message.edit_date.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        except Exception:
+            edit_date_utc = date_utc
+
+    db.store_conversation_message(
+        chat_id=message.chat_id,
+        message_id=message.message_id,
+        date_utc=date_utc,
+        edit_date_utc=edit_date_utc,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        sender_username=sender_username,
+        reply_to_message_id=parent_id,
+        text_value=text_value,
+        normalized_text=normalize_intent(text_value),
+        message_link=build_message_link(message.chat, message.message_id) or "",
+        media_type=history_message_media_type(message),
+    )
+
+    normalized = normalize_intent(text_value)
+    is_question = int(looks_like_question(text_value))
+    is_request = int(any(re.search(p, normalized) for p in HISTORY_REQUEST_PATTERNS))
+    feedback = history_feedback_kind(text_value)
+    is_closure = int(bool(feedback and parent_id))
+
+    parent_cls = db.get_conversation_classification(message.chat_id, parent_id) if parent_id else None
+    parent_is_need = bool(
+        parent_cls and (int(parent_cls["is_question"] or 0) or int(parent_cls["is_request"] or 0))
+    )
+
+    is_answer = int(
+        bool(parent_is_need and not is_question and not is_request and not is_closure)
+    )
+    helpful_hits = sum(1 for p in HISTORY_HELP_PATTERNS if re.search(p, normalized))
+    is_helpful = int(bool(is_answer and (helpful_hits > 0 or len(text_value) >= 35)))
+    root_id = message.message_id if (is_question or is_request) else (
+        int(parent_cls["root_question_id"] or parent_id) if parent_cls else 0
+    )
+
+    primary = "NORMAL"
+    if is_closure:
+        primary = "THANKS_CLOSURE"
+    elif is_request:
+        primary = "REQUEST_HELP"
+    elif is_question:
+        primary = "QUESTION"
+    elif is_helpful:
+        primary = "HELP_PROBABLE"
+    elif is_answer:
+        primary = "ANSWER"
+
+    db.upsert_conversation_classification(
+        message.chat_id, message.message_id, primary,
+        is_question, is_request, is_answer, is_helpful, is_closure, 0,
+        4 if is_question else 0,
+        5 if is_request else 0,
+        4 if is_answer else 0,
+        min(10, helpful_hits * 2 + (4 if parent_is_need else 0)),
+        5 if is_closure else 0,
+        parent_id, root_id,
+        "aprendizaje_continuo_v2.8",
+    )
+
+    # Crear par inicial cuando alguien responde directamente a una necesidad.
+    if is_answer and parent_cls:
+        question_id = int(parent_cls["root_question_id"] or parent_id)
+        db.upsert_conversation_pair(
+            message.chat_id,
+            question_id,
+            message.message_id,
+            0,
+            0.70 if parent_id == question_id else 0.55,
+            "PROBABLE",
+            "aprendizaje_continuo: reply_a_consulta",
+        )
+
+    # Confirmación estricta: el cierre debe responder a una respuesta ya enlazada
+    # y debe venir del mismo autor que originó la consulta.
+    if is_closure and parent_id:
+        pair = db.find_pair_by_answer(message.chat_id, parent_id)
+        if pair:
+            qrow = db.get_conversation_message(
+                message.chat_id,
+                int(pair["question_message_id"]),
+            )
+            same_author = bool(
+                qrow and int(qrow["sender_id"] or 0) == sender_id
+            )
+            if same_author:
+                status = feedback or "ACKNOWLEDGED"
+                confidence = 0.99 if status == "CONFIRMED" else (
+                    0.40 if status == "REJECTED" else float(pair["confidence"] or 0.70)
+                )
+                db.upsert_conversation_pair(
+                    message.chat_id,
+                    int(pair["question_message_id"]),
+                    int(pair["answer_message_id"]),
+                    message.message_id,
+                    confidence,
+                    status,
+                    f"aprendizaje_continuo: autor_original_{status.lower()}",
+                )
+                if status == "CONFIRMED":
+                    answer_cls = db.get_conversation_classification(
+                        message.chat_id,
+                        int(pair["answer_message_id"]),
+                    )
+                    if answer_cls:
+                        db.upsert_conversation_classification(
+                            message.chat_id,
+                            int(pair["answer_message_id"]),
+                            "SOLUTION_CONFIRMED",
+                            int(answer_cls["is_question"] or 0),
+                            int(answer_cls["is_request"] or 0),
+                            1, 1, int(answer_cls["is_closure"] or 0), 1,
+                            int(answer_cls["question_score"] or 0),
+                            int(answer_cls["request_score"] or 0),
+                            max(4, int(answer_cls["answer_score"] or 0)),
+                            max(7, int(answer_cls["help_score"] or 0)),
+                            int(answer_cls["closure_score"] or 0),
+                            int(answer_cls["parent_message_id"] or 0),
+                            int(answer_cls["root_question_id"] or 0),
+                            "aprendizaje_continuo: solucion_confirmada_por_autor_original",
+                        )
+
+
+async def command_history_search(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("La búsqueda histórica se utiliza dentro de los grupos autorizados.")
+        return
+
+    await delete_group_command_invocation(message, context)
+
+    if not history_memory_enabled_for_chat(chat.id):
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="🧠 La memoria histórica no está habilitada en este grupo.",
+        )
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Uso: /historial DEP450\nEjemplo: /historial DM4601e firmware",
+        )
+        return
+
+    terms = history_extract_search_terms(query)
+    anchor = history_model_anchor(query)
+    if anchor:
+        terms = [t for t in terms if re.sub(r"[^a-z0-9]", "", t) != anchor]
+
+    rows = db.search_conversation_history(
+        HISTORY_SOURCE_CHAT_ID,
+        terms,
+        anchor,
+        limit=8,
+    )
+
+    if not rows:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"🌵 Pecos no encontró conversaciones históricas para «{query}».",
+        )
+        return
+
+    lines = [f"🧠 Pecos encontró {len(rows)} resultado(s) históricos para «{query}»:"]
+    for idx, row in enumerate(rows, start=1):
+        label = str(row["primary_label"] or "NORMAL")
+        status = str(row["pair_status"] or "")
+        text_out = " ".join(str(row["text"] or "").split())
+        if len(text_out) > 320:
+            text_out = text_out[:317] + "..."
+        item = f"{idx}. [{label}"
+        if status:
+            item += f" · {status}"
+        item += f"] {text_out}"
+        if row["message_link"]:
+            item += f"\n   🔗 {row['message_link']}"
+        lines.append(item)
+
+    await send_long_text(chat.id, "\n\n".join(lines), context)
 
 
 def find_blocked_term(text: str) -> str | None:
@@ -4687,6 +5455,12 @@ async def handle_collective_greeting(message: Message) -> bool:
         )
     )
 
+    # Un saludo puede venir acompañado de una solicitud técnica real.
+    # En ese caso Pecos saluda, pero NO corta el procesamiento: deja que el
+    # buscador automático atienda también la petición en el mismo mensaje.
+    if technical_archive_terms(message.text):
+        return False
+
     return True
 
 
@@ -4817,6 +5591,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     is_edited = bool(update.edited_message or update.edited_channel_post)
+
+    # Memoria histórica continua. Solo opera en HISTORY_MEMORY_GROUP_IDS.
+    # No interviene en SHA-256, file_fingerprints ni en la decisión de duplicados.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await learn_historical_memory(message, is_edited=is_edited)
 
     # Saludo especial persistente para @leosedf:
     # una sola vez por día, en su primera aparición.
@@ -5021,6 +5800,7 @@ async def post_init(application: Application) -> None:
         BotCommand("olvidar", "Borrar un recuerdo propio por ID"),
         BotCommand("pecos", "Llamar a Pecos"),
         BotCommand("buscar", "Buscar archivos históricos"),
+        BotCommand("historial", "Buscar conversaciones históricas"),
         BotCommand("consejo", "Pedir un consejo a Pecos"),
         BotCommand("frase", "Frase de Pecos"),
         BotCommand("excusa", "Generar una excusa"),
@@ -5063,6 +5843,7 @@ async def post_init(application: Application) -> None:
         TELEGRAM_FILES_DIR,
     )
     log.info("Grupos autorizados: %s", ",".join(str(x) for x in sorted(ALLOWED_GROUP_IDS)))
+    log.info("Memoria histórica activa en grupos: %s | fuente=%s", ",".join(str(x) for x in sorted(HISTORY_MEMORY_GROUP_IDS)), HISTORY_SOURCE_CHAT_ID)
 
     # Si la base conserva otros grupos antiguos, Pecos intenta salir de ellos
     # al iniciar. No se elimina historial; simplemente quedan inactivos.
@@ -5162,6 +5943,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("olvidar", command_forget), group=0)
     app.add_handler(CommandHandler("pecos", command_pecos), group=0)
     app.add_handler(CommandHandler("buscar", command_search_archive), group=0)
+    app.add_handler(CommandHandler("historial", command_history_search), group=0)
     app.add_handler(CommandHandler("consejo", command_advice), group=0)
     app.add_handler(CommandHandler("frase", command_phrase), group=0)
     app.add_handler(CommandHandler("excusa", command_excuse), group=0)
