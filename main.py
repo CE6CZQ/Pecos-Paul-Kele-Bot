@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.1-admin-history-solutions"
+VERSION = "2.8.2-smart-software-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -288,15 +288,50 @@ ARCHIVE_SEARCH_STOPWORDS = {
     "encuentra", "encuentrame", "tenemos", "tienes", "tienen", "hay", "algo",
     "archivo", "archivos", "para", "por", "favor", "favor", "del", "de", "la",
     "el", "los", "las", "un", "una", "unos", "unas", "que", "qué", "quiero",
-    "necesito", "necesitamos", "sobre", "relacionado", "relacionados", "software",
-    "programa", "programas", "algun", "alguno", "alguna", "algunos", "algunas",
-    "me", "puedes", "puede", "podrias", "podría", "ver", "si", "existe",
+    "necesito", "necesitamos", "sobre", "relacionado", "relacionados",
+    "algun", "alguno", "alguna", "algunos", "algunas", "me", "puedes", "puede",
+    "podrias", "podría", "ver", "si", "existe", "salta", "saltar", "quita",
+    "quitar", "elimina", "eliminar", "saca", "sacar", "necesita", "necesitan",
 }
 
 TECHNICAL_ARCHIVE_WORDS = {
     "cps", "dmr", "firmware", "codeplug", "hytera", "motorola", "kenwood",
     "icom", "baofeng", "anytone", "vertex", "yaesu", "radioddity", "retevis",
-    "programming", "programacion", "driver", "drivers",
+    "programming", "programacion", "driver", "drivers", "software", "programa",
+    "programas", "password", "clave", "contrasena", "unlock", "desbloqueo",
+    "bypass", "crack", "patch", "patched", "tuner", "tool", "utility", "flash",
+    "upgrade", "downgrade", "recovery", "programmer", "programador", "rss",
+    "management",
+}
+
+# Familias/plataformas de software que no necesariamente contienen números.
+# Se mantienen separadas de los modelos para no confundir, por ejemplo, APX con
+# MOTOTRBO solo porque ambos usan CPS.
+ARCHIVE_FAMILY_ALIASES: dict[str, set[str]] = {
+    "mototrbo": {"mototrbo", "motortrbo", "motorbo", "mototurbo", "motrbo"},
+    "apx": {"apx"},
+    "astro25": {"astro25", "astro 25", "astro-25"},
+    "tetra": {"tetra"},
+    "nxdn": {"nxdn"},
+}
+
+# Alias semánticos y errores frecuentes de escritura. Solo se usan para entender
+# mejor la consulta; nunca autorizan por sí solos a mezclar familias incompatibles.
+ARCHIVE_TERM_ALIASES: dict[str, set[str]] = {
+    "software": {"software", "sofware", "softwre", "softwar"},
+    "firmware": {"firmware", "firware", "firmwere"},
+    "password": {"password", "pasword", "passwrod", "contrasena", "clave", "pass"},
+    "crack": {"crack", "cracked", "patch", "patched"},
+    "codeplug": {"codeplug", "codeplg", "code plug"},
+    "driver": {"driver", "drivers", "drv"},
+}
+
+ARCHIVE_GENERIC_RESOURCE_TERMS = {
+    "software", "programa", "programas", "cps", "firmware", "driver", "drivers",
+    "password", "clave", "contrasena", "unlock", "desbloqueo", "bypass", "crack",
+    "patch", "patched", "codeplug", "flash", "tuner", "tool", "utility",
+    "programming", "programacion", "programmer", "programador", "recovery",
+    "upgrade", "downgrade", "management", "rss",
 }
 
 
@@ -2408,9 +2443,126 @@ def archive_name_matches_model(file_name: str, model: str) -> bool:
     return bool(compact_model and compact_model in compact_name)
 
 
+def _archive_alias_to_canonical() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for canonical, aliases in ARCHIVE_TERM_ALIASES.items():
+        for alias in aliases | {canonical}:
+            result[archive_normalized_name(alias)] = canonical
+    for canonical, aliases in ARCHIVE_FAMILY_ALIASES.items():
+        for alias in aliases | {canonical}:
+            result[archive_normalized_name(alias)] = canonical
+    return result
+
+
+ARCHIVE_ALIAS_TO_CANONICAL = _archive_alias_to_canonical()
+
+
+def canonical_archive_token(token: str) -> str:
+    normalized = archive_normalized_name(token)
+    if not normalized:
+        return ""
+
+    exact = ARCHIVE_ALIAS_TO_CANONICAL.get(normalized)
+    if exact:
+        return exact
+
+    # Corrección leve de errores de escritura solo para palabras alfabéticas
+    # relativamente largas. Los identificadores/modelos con números se dejan
+    # intactos para evitar convertir un modelo en otro.
+    if normalized.isalpha() and len(normalized) >= 5:
+        candidates = set(TECHNICAL_ARCHIVE_WORDS) | set(ARCHIVE_FAMILY_ALIASES)
+        best = ""
+        best_score = 0.0
+        for candidate in candidates:
+            score = SequenceMatcher(None, normalized, candidate).ratio()
+            if score > best_score:
+                best = candidate
+                best_score = score
+        if best_score >= 0.88:
+            return best
+
+    return normalized
+
+
+def archive_family_terms(text_value: str) -> list[str]:
+    normalized = archive_normalized_name(text_value or "")
+    if not normalized:
+        return []
+
+    tokens = normalized.split()
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for canonical, aliases in ARCHIVE_FAMILY_ALIASES.items():
+        variants = aliases | {canonical}
+        matched = False
+        for alias in variants:
+            alias_norm = archive_normalized_name(alias)
+            if alias_norm and re.search(rf"(?:^|\s){re.escape(alias_norm)}(?:$|\s)", normalized):
+                matched = True
+                break
+
+        if not matched:
+            # Tolerancia a un error de escritura corto en familias conocidas.
+            for token in tokens:
+                if len(token) >= 5 and SequenceMatcher(None, token, canonical).ratio() >= 0.84:
+                    matched = True
+                    break
+
+        if matched and canonical not in seen:
+            seen.add(canonical)
+            found.append(canonical)
+
+    return found[:4]
+
+
+def archive_name_matches_family(file_name: str, family: str) -> bool:
+    normalized_name = archive_normalized_name(file_name)
+    name_tokens = normalized_name.split()
+    aliases = ARCHIVE_FAMILY_ALIASES.get(family, {family}) | {family}
+
+    for alias in aliases:
+        alias_norm = archive_normalized_name(alias)
+        if not alias_norm:
+            continue
+        if alias_norm in normalized_name:
+            return True
+        if len(alias_norm) >= 5:
+            for token in name_tokens:
+                if len(token) >= 5 and SequenceMatcher(None, token, alias_norm).ratio() >= 0.88:
+                    return True
+    return False
+
+
+def archive_identifier_terms(text_value: str) -> list[str]:
+    terms = extract_archive_terms(text_value)
+    result: list[str] = []
+    for term in terms:
+        compact = re.sub(r"[^a-z0-9]", "", term)
+        if len(compact) >= 3 and any(c.isalpha() for c in compact) and any(c.isdigit() for c in compact):
+            result.append(term)
+    return result[:4]
+
+
+def archive_term_variants(term: str) -> set[str]:
+    canonical = canonical_archive_token(term)
+    variants = {archive_normalized_name(canonical)}
+
+    for key, aliases in ARCHIVE_TERM_ALIASES.items():
+        if canonical == key:
+            variants.update(archive_normalized_name(alias) for alias in aliases)
+
+    for key, aliases in ARCHIVE_FAMILY_ALIASES.items():
+        if canonical == key:
+            variants.update(archive_normalized_name(alias) for alias in aliases)
+
+    return {v for v in variants if v}
+
+
 def extract_archive_terms(text_value: str) -> list[str]:
     normalized = normalize_intent(text_value or "")
     models = archive_model_terms(normalized)
+    families = archive_family_terms(normalized)
 
     # Evita que un modelo separado como "PRO 5100" termine convertido en
     # dos términos débiles ("pro" y "5100"). Se elimina esa secuencia
@@ -2434,22 +2586,33 @@ def extract_archive_terms(text_value: str) -> list[str]:
             continue
         if len(token) < 3 and not any(ch.isdigit() for ch in token):
             continue
-        if token not in seen:
-            seen.add(token)
-            result.append(token)
+
+        canonical = canonical_archive_token(token)
+        if not canonical:
+            continue
+        if canonical not in seen:
+            seen.add(canonical)
+            result.append(canonical)
+
+    for family in families:
+        if family not in seen:
+            seen.add(family)
+            result.append(family)
 
     for model in models:
         if model not in seen:
             seen.add(model)
             result.append(model)
 
-    # Los términos técnicos primero; luego los modelos. Esto conserva CPS,
-    # firmware, driver, etc. sin perder ninguno de los modelos solicitados.
+    # Términos técnicos primero, luego familias/plataformas y modelos.
     technical = [t for t in result if t in TECHNICAL_ARCHIVE_WORDS]
+    family_set = set(families)
+    family_items = [t for t in result if t in family_set]
     model_set = set(models)
     model_items = [t for t in result if t in model_set]
-    other = [t for t in result if t not in set(technical) | model_set]
-    return (technical + model_items + other)[:8]
+    reserved = set(technical) | family_set | model_set
+    other = [t for t in result if t not in reserved]
+    return (technical + family_items + model_items + other)[:10]
 
 
 def archive_search_score(file_name: str, terms: list[str]) -> float:
@@ -2462,23 +2625,40 @@ def archive_search_score(file_name: str, terms: list[str]) -> float:
     matched = 0
 
     for term in terms:
-        normalized_term = archive_normalized_name(term)
-        if not normalized_term:
-            continue
+        variants = archive_term_variants(term)
+        term_matched = False
 
-        if normalized_term in name_tokens:
-            score += 4.0
-            matched += 1
-        elif normalized_term in normalized_name:
-            score += 2.5
-            matched += 1
-        else:
-            # Aproximación leve para modelos escritos con separadores distintos.
+        for variant in variants:
+            if variant in name_tokens:
+                score += 4.0
+                term_matched = True
+                break
+            if variant in normalized_name:
+                score += 2.5
+                term_matched = True
+                break
+
             compact_name = normalized_name.replace(" ", "")
-            compact_term = normalized_term.replace(" ", "")
-            if compact_term and compact_term in compact_name:
+            compact_variant = variant.replace(" ", "")
+            if compact_variant and compact_variant in compact_name:
                 score += 2.0
-                matched += 1
+                term_matched = True
+                break
+
+        if not term_matched:
+            canonical = canonical_archive_token(term)
+            # Similitud controlada: solo palabras largas sin números.
+            if canonical.isalpha() and len(canonical) >= 5:
+                best_ratio = max(
+                    (SequenceMatcher(None, canonical, token).ratio() for token in name_tokens if len(token) >= 4),
+                    default=0.0,
+                )
+                if best_ratio >= 0.88:
+                    score += 1.4
+                    term_matched = True
+
+        if term_matched:
+            matched += 1
 
     if matched == len(terms):
         score += 3.0
@@ -2496,6 +2676,7 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         return []
 
     requested_models = archive_model_terms(query)
+    requested_families = archive_family_terms(query)
     ranked: list[tuple[float, sqlite3.Row]] = []
 
     for row in db.list_archive_fingerprints(chat_id):
@@ -2503,10 +2684,8 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         if not archive_file_allowed(file_name):
             continue
 
-        # Si el usuario indicó uno o más modelos, una coincidencia genérica
-        # por "CPS", "firmware" o "driver" NO basta. El nombre del
-        # archivo debe contener al menos uno de los modelos pedidos.
-        # Esto impide, por ejemplo, ofrecer CPS de APX ante una consulta EM200.
+        # Un modelo concreto es un ancla dura: no se ofrecen archivos de otra
+        # familia solo porque comparten palabras genéricas como CPS/firmware.
         matched_models = [
             model for model in requested_models
             if archive_name_matches_model(file_name, model)
@@ -2514,12 +2693,20 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         if requested_models and not matched_models:
             continue
 
+        # Lo mismo para familias/plataformas sin números (MOTOTRBO, APX, etc.).
+        matched_families = [
+            family for family in requested_families
+            if archive_name_matches_family(file_name, family)
+        ]
+        if requested_families and not matched_families:
+            continue
+
         score = archive_search_score(file_name, terms)
         if score <= 0:
             continue
 
-        # La coincidencia exacta de modelo domina la clasificación.
         score += 12.0 * len(matched_models)
+        score += 9.0 * len(matched_families)
         ranked.append((score, row))
 
     ranked.sort(key=lambda pair: (pair[0], int(pair[1]["message_id"])), reverse=True)
@@ -2552,12 +2739,30 @@ def archive_result_lines(chat: Chat, rows: list[sqlite3.Row], max_items: int = 6
     return lines
 
 
+def archive_query_needs_target(query: str, terms: list[str] | None = None) -> bool:
+    terms = terms if terms is not None else extract_archive_terms(query)
+    if not terms:
+        return False
+
+    if archive_model_terms(query) or archive_family_terms(query) or archive_identifier_terms(query):
+        return False
+
+    specific = [term for term in terms if term not in ARCHIVE_GENERIC_RESOURCE_TERMS]
+    return bool(terms) and not specific
+
+
 def archive_query_from_natural_text(text_value: str) -> str | None:
     normalized = normalize_intent(text_value or "").strip()
     if not re.search(r"\b(pecos|peco)\b", normalized):
         return None
 
-    intent = (
+    terms = extract_archive_terms(text_value)
+    models = archive_model_terms(text_value)
+    families = archive_family_terms(text_value)
+    identifiers = archive_identifier_terms(text_value)
+    technical = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
+
+    explicit_intent = (
         "busca" in normalized
         or "buscar" in normalized
         or "encuentra" in normalized
@@ -2571,10 +2776,15 @@ def archive_query_from_natural_text(text_value: str) -> str | None:
         or "que hay para" in normalized
         or "que tenemos" in normalized
     )
-    if not intent:
+
+    # Además de las frases "Pecos busca...", acepta consultas cortas de uso real:
+    # "Pecos CPS APX?", "Pecos CPS MOTOTRBO?", "Pecos KPG-D6" o
+    # "Pecos salta password". Los saludos/conversación social siguen fuera
+    # porque requieren al menos una señal técnica, familia, modelo o identificador.
+    strong_archive_signal = bool(technical or families or models or identifiers)
+    if not explicit_intent and not strong_archive_signal:
         return None
 
-    terms = extract_archive_terms(text_value)
     if not terms:
         return ""
     return " ".join(terms)
@@ -2608,16 +2818,25 @@ def technical_archive_terms(text_value: str) -> list[str]:
         return []
 
     model_terms = archive_model_terms(text_value)
+    family_terms = archive_family_terms(text_value)
+    identifier_terms = archive_identifier_terms(text_value)
     technical_words = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
 
     if model_terms:
-        # Conserva todos los modelos detectados (hasta cuatro) y no solo el
-        # primero. Así "CPS para EM200 y PRO 5100" busca ambos equipos.
-        return (technical_words + model_terms)[:6]
+        return (technical_words + family_terms + model_terms)[:8]
 
-    # Sin un modelo alfanumérico exigimos al menos dos pistas técnicas para no invadir.
+    if family_terms and technical_words:
+        # Ejemplos: "cps mototrbo", "crack mototrbo", "firmware apx".
+        return (technical_words + family_terms)[:8]
+
+    if identifier_terms and technical_words:
+        # Ejemplo: "software KPG-D6".
+        return (technical_words + identifier_terms)[:8]
+
+    # Sin modelo/familia/identificador exigimos al menos dos pistas técnicas
+    # para no invadir conversaciones casuales del grupo.
     if len(technical_words) >= 2:
-        return technical_words[:4]
+        return technical_words[:5]
 
     return []
 
@@ -2650,6 +2869,16 @@ async def send_archive_search_results(
         await context.bot.send_message(
             chat_id=chat.id,
             text="🤠 Dime qué modelo, programa o palabra debo buscar. Ejemplo: «Pecos busca XPR7550»."
+        )
+        return True
+
+    if archive_query_needs_target(query, terms):
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                "👀 Entendido. ¿Para qué modelo, familia o plataforma necesitas revisarlo? "
+                "Por ejemplo: EM200, DEP450, MOTOTRBO o APX."
+            ),
         )
         return True
 
@@ -5567,6 +5796,11 @@ async def handle_social(message: Message) -> bool:
     if not re.search(r"\b(pecos|peco)\b", normalized):
         return False
 
+    # Una petición técnica directa ("Pecos CPS MOTOTRBO?", etc.) pertenece
+    # al buscador y no debe caer en una respuesta social genérica.
+    if archive_query_from_natural_text(message.text) is not None:
+        return False
+
     usuario = display_name(message)
 
     is_farewell = (
@@ -5821,15 +6055,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if await handle_identity(message, context):
         return
 
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # Las consultas técnicas dirigidas a Pecos tienen prioridad sobre las
+        # respuestas sociales genéricas. Esto permite frases cortas como
+        # "Pecos CPS MOTOTRBO?" sin exigir la palabra "busca".
+        if await handle_archive_natural_query(message, context):
+            return
+
     if await handle_social(message):
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        # Fase 3: una consulta explícita al archivo tiene prioridad sobre la
-        # respuesta genérica de "Pecos".
-        if await handle_archive_natural_query(message, context):
-            return
-
         if await handle_direct_pecos_mention(message):
             return
 
