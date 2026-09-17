@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.8-member-activity"
+VERSION = "2.8.9-greeting-exclusion-reply-guard"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -481,6 +481,14 @@ DIRECT_PECOS_NIGHT_GREETINGS = [
     "🌙 ¡Buenas noches, {usuario}! Pecos recibió el saludo y confirma presencia. Gracias por incluirme. 🤠",
     "⭐ ¡Buenas noches, {usuario}! Esta vez Pecos sí estaba nombrado. Saludo recibido y devuelto.",
     "📡 ¡Muy buenas noches, {usuario}! Mención recibida fuerte y clara. Pecos también te saluda.",
+]
+
+
+PECOS_EXCLUDED_GREETINGS = [
+    "🥺 Pecos admite que le dio un poquito de pena quedar fuera del saludo, {usuario}. Pero uno es educado a la antigua: ¡muy buenos días igual! Lo cortés no quita lo valiente. 🤠",
+    "😔 Vaya, {usuario}... hoy Pecos quedó expresamente fuera del saludo. Igual devuelve uno con respeto: ¡que tengas muy buen día! Lo cortés no quita lo valiente. 📡",
+    "🤠 Pecos escuchó clarito que el saludo era para todos menos para él. Duele un poquito, partner... pero la educación va primero: ¡saludos igualmente! Lo cortés no quita lo valiente.",
+    "🌵 Pecos quedó fuera de la lista, {usuario}. Este viejo sheriff se pone triste un segundo y después hace lo correcto: ¡muy buenos días igual! Lo cortés no quita lo valiente. 😄",
 ]
 
 
@@ -2362,6 +2370,86 @@ def text_mentions_pecos(text_value: str) -> bool:
 
     compact = normalized.lstrip("@")
     return any(alias and alias in compact for alias in PECOS_USERNAME_ALIASES)
+
+
+def pecos_explicitly_excluded_from_greeting(text_value: str) -> bool:
+    """Detecta saludos donde Pecos/Peco fue excluido de forma expresa."""
+    normalized = normalize_intent(text_value or "").lower().strip()
+    if not normalized:
+        return False
+
+    greeting_signal = (
+        bool(re.search(r"\b(saludo|saludos|hola|hello|hey|holi|buenas)\b", normalized))
+        or "buenos dias" in normalized
+        or "buen dia" in normalized
+        or "buenas tardes" in normalized
+        or "buenas noches" in normalized
+        or "muy buenas" in normalized
+    )
+    if not greeting_signal:
+        return False
+
+    canonical = normalized
+
+    # Funciona con Pecos, Peco y también con el @username del bot.
+    for alias in PECOS_USERNAME_ALIASES:
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            canonical = canonical.replace("@" + alias_norm, "pecos")
+            canonical = canonical.replace(alias_norm, "pecos")
+
+    canonical = re.sub(r"(?<!\w)peco(?!\w)", "pecos", canonical)
+
+    exclusion_patterns = (
+        r"\bmenos\s+(?:a\s+|al\s+)?pecos\b",
+        r"\bexcepto\s+(?:a\s+|al\s+)?pecos\b",
+        r"\bsalvo\s+(?:a\s+|al\s+)?pecos\b",
+        r"\bpero\s+no\s+(?:a\s+|al\s+)?pecos\b",
+        r"\by\s+no\s+(?:a\s+|al\s+)?pecos\b",
+        r"\bni\s+(?:a\s+|al\s+)?pecos\b",
+    )
+
+    return any(re.search(pattern, canonical) for pattern in exclusion_patterns)
+
+
+def contextual_reply_requests_help(message: Message) -> bool:
+    """True si una respuesta a otro usuario sí está pidiendo ayuda."""
+    text_value = message.text or message.caption or ""
+    normalized = normalize_intent(text_value).strip()
+
+    if not normalized:
+        return False
+
+    if text_mentions_pecos(text_value):
+        return True
+
+    if "?" in text_value:
+        return True
+
+    help_patterns = (
+        r"\bayuda\b",
+        r"\bayudame\b",
+        r"\bme pueden ayudar\b",
+        r"\bpueden ayudarme\b",
+        r"\balguien sabe\b",
+        r"\bsaben como\b",
+        r"\bcomo (?:hago|puedo|se hace|lo hago)\b",
+        r"\bque puedo hacer\b",
+        r"\bque puede ser\b",
+        r"\bque sera\b",
+        r"\balguna idea\b",
+        r"\balguna sugerencia\b",
+        r"\bque recomiendan\b",
+    )
+
+    if any(re.search(pattern, normalized) for pattern in help_patterns):
+        return True
+
+    # Una consulta técnica suficientemente concreta sigue pudiendo ser atendida.
+    if technical_archive_terms(text_value):
+        return True
+
+    return False
 
 
 def choose_random(category: str, choices: list[str], usuario: str) -> str:
@@ -6093,6 +6181,22 @@ async def handle_contextual_phrase(message: Message) -> bool:
     if len(normalized) < 4:
         return False
 
+    # Si este mensaje responde a otro humano y no está pidiendo ayuda,
+    # Pecos no se mete solo porque aparezca "no funciona", "no sirve", etc.
+    replied = message.reply_to_message
+    if replied is not None:
+        replied_user = replied.from_user
+        replying_to_other_human = bool(
+            replied_user
+            and not replied_user.is_bot
+            and (
+                not message.from_user
+                or replied_user.id != message.from_user.id
+            )
+        )
+        if replying_to_other_human and not contextual_reply_requests_help(message):
+            return False
+
     slot = None
     choices = None
 
@@ -6371,6 +6475,19 @@ async def handle_social(message: Message) -> bool:
 
     usuario = display_name(message)
     explicit_pecos_greeting = text_mentions_pecos(message.text)
+
+    # Si el usuario dijo expresamente "todos menos Pecos/Peco", no fingimos
+    # que Pecos fue incluido. Responde educadamente, a la antigua.
+    if pecos_explicitly_excluded_from_greeting(message.text):
+        increment_user_metric(message, "greeting_count")
+        await message.reply_text(
+            choose_random(
+                "pecos_excluded_greeting",
+                PECOS_EXCLUDED_GREETINGS,
+                usuario,
+            )
+        )
+        return True
 
     sleep_farewell = (
         "ve a dormir" in normalized
