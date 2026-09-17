@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.9-greeting-exclusion-reply-guard"
+VERSION = "2.8.10-directed-thanks"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -2410,6 +2410,35 @@ def pecos_explicitly_excluded_from_greeting(text_value: str) -> bool:
     )
 
     return any(re.search(pattern, canonical) for pattern in exclusion_patterns)
+
+
+def gratitude_is_for_pecos(message: Message) -> bool:
+    """Devuelve True solo si el agradecimiento está dirigido a Pecos.
+
+    Se considera dirigido a Pecos cuando:
+    - el texto menciona Pecos/Peco/@username, o
+    - el mensaje responde directamente a un mensaje del propio bot.
+
+    Un "muchas gracias" genérico entre usuarios no debe hacer intervenir a Pecos.
+    """
+    text_value = message.text or message.caption or ""
+
+    if text_mentions_pecos(text_value):
+        return True
+
+    replied = message.reply_to_message
+    if replied is None or replied.from_user is None:
+        return False
+
+    replied_user = replied.from_user
+    if not replied_user.is_bot:
+        return False
+
+    username = normalize_intent(replied_user.username or "").lower().lstrip("@")
+    if not username:
+        return False
+
+    return username in PECOS_USERNAME_ALIASES
 
 
 def contextual_reply_requests_help(message: Message) -> bool:
@@ -6223,11 +6252,15 @@ async def handle_contextual_phrase(message: Message) -> bool:
         slot = "success"
         choices = CONTEXTUAL_SUCCESS_MESSAGES
     elif (
-        "gracias pecos" in normalized
-        or "gracias grupo" in normalized
-        or normalized == "gracias"
+        "gracias" in normalized
         or "muchas gracias" in normalized
+        or "te agradezco" in normalized
+        or "thanks" in normalized
     ):
+        # Pecos solo responde agradecimientos si están dirigidos a él.
+        # Así no se mete cuando un usuario está agradeciendo a otro.
+        if not gratitude_is_for_pecos(message):
+            return False
         slot = "thanks"
         choices = CONTEXTUAL_THANKS_MESSAGES
 
@@ -6257,6 +6290,9 @@ async def maybe_react_to_message(
         emoji = "😂"
         probability = 65
     elif any(word in normalized for word in ("gracias", "excelente", "genial", "perfecto", "buena noticia")):
+        # Si es un agradecimiento, reaccionar solo cuando va dirigido a Pecos.
+        if "gracias" in normalized and not gratitude_is_for_pecos(message):
+            return False
         emoji = random.choice(["👍", "❤️", "👏"])
         probability = 55
     elif any(word in normalized for word in ("felicitaciones", "felicidades", "bravo")):
