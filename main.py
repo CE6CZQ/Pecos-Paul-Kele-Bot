@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.6-explicit-bot-greetings"
+VERSION = "2.8.7-no-edited-auto-replies"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -6278,6 +6278,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # No interviene en SHA-256, file_fingerprints ni en la decisión de duplicados.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await learn_historical_memory(message, is_edited=is_edited)
+
+    # Un mensaje editado NO vuelve a disparar respuestas automáticas.
+    # Telegram conserva el mismo chat_id + message_id, pero envía un nuevo
+    # update de tipo edited_message. La memoria puede actualizarse y la
+    # moderación sigue revisando el contenido editado; después terminamos aquí.
+    if is_edited:
+        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await moderate_if_needed(message, context)
+        return
 
     # Saludo especial persistente para @leosedf:
     # una sola vez por día, en su primera aparición.
