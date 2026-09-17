@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.2-smart-software-search"
+VERSION = "2.8.3-conservative-smart-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -2484,6 +2484,65 @@ def canonical_archive_token(token: str) -> str:
     return normalized
 
 
+def strict_archive_family_terms(text_value: str) -> list[str]:
+    """Detecta familias/plataformas solo por coincidencia explícita de alias.
+
+    Se usa únicamente para decidir si Pecos debe intervenir automáticamente.
+    La similitud difusa queda reservada para interpretar una consulta que ya fue
+    identificada como técnica, evitando falsos positivos en conversación casual.
+    """
+    normalized = archive_normalized_name(text_value or "")
+    if not normalized:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for canonical, aliases in ARCHIVE_FAMILY_ALIASES.items():
+        for alias in aliases | {canonical}:
+            alias_norm = archive_normalized_name(alias)
+            if alias_norm and re.search(rf"(?:^|\s){re.escape(alias_norm)}(?:$|\s)", normalized):
+                if canonical not in seen:
+                    seen.add(canonical)
+                    found.append(canonical)
+                break
+    return found[:4]
+
+
+def strict_technical_archive_words(text_value: str) -> list[str]:
+    """Devuelve señales técnicas escritas explícitamente por el usuario.
+
+    No aplica similitud ortográfica. Esto es intencional: la similitud ayuda a
+    comprender una búsqueda ya detectada, pero nunca debe convertir una charla
+    cotidiana en una búsqueda automática de archivos.
+    """
+    normalized = archive_normalized_name(text_value or "")
+    if not normalized:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    # Palabras técnicas canónicas.
+    for word in TECHNICAL_ARCHIVE_WORDS:
+        word_norm = archive_normalized_name(word)
+        if word_norm and re.search(rf"(?:^|\s){re.escape(word_norm)}(?:$|\s)", normalized):
+            if word not in seen:
+                seen.add(word)
+                found.append(word)
+
+    # Alias exactos conocidos (sofware, pasword, code plug, etc.).
+    for canonical, aliases in ARCHIVE_TERM_ALIASES.items():
+        for alias in aliases | {canonical}:
+            alias_norm = archive_normalized_name(alias)
+            if alias_norm and re.search(rf"(?:^|\s){re.escape(alias_norm)}(?:$|\s)", normalized):
+                if canonical not in seen:
+                    seen.add(canonical)
+                    found.append(canonical)
+                break
+
+    return found[:8]
+
+
 def archive_family_terms(text_value: str) -> list[str]:
     normalized = archive_normalized_name(text_value or "")
     if not normalized:
@@ -2760,7 +2819,11 @@ def archive_query_from_natural_text(text_value: str) -> str | None:
     models = archive_model_terms(text_value)
     families = archive_family_terms(text_value)
     identifiers = archive_identifier_terms(text_value)
-    technical = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
+
+    # Para decidir si Pecos debe intervenir por sí solo usamos solo señales
+    # explícitas. La similitud ortográfica NO puede activar una búsqueda.
+    strict_technical = strict_technical_archive_words(text_value)
+    strict_families = strict_archive_family_terms(text_value)
 
     explicit_intent = (
         "busca" in normalized
@@ -2781,7 +2844,7 @@ def archive_query_from_natural_text(text_value: str) -> str | None:
     # "Pecos CPS APX?", "Pecos CPS MOTOTRBO?", "Pecos KPG-D6" o
     # "Pecos salta password". Los saludos/conversación social siguen fuera
     # porque requieren al menos una señal técnica, familia, modelo o identificador.
-    strong_archive_signal = bool(technical or families or models or identifiers)
+    strong_archive_signal = bool(strict_technical or strict_families or models or identifiers)
     if not explicit_intent and not strong_archive_signal:
         return None
 
@@ -2813,6 +2876,12 @@ def archive_hint_allowed(chat_id: int, terms: list[str]) -> bool:
 
 
 def technical_archive_terms(text_value: str) -> list[str]:
+    """Términos para la búsqueda automática, con activación conservadora.
+
+    La similitud/normalización sigue disponible DESPUÉS de detectar una consulta
+    técnica, pero una conversación casual nunca debe disparar el buscador por
+    similitudes accidentales.
+    """
     terms = extract_archive_terms(text_value)
     if not terms:
         return []
@@ -2820,24 +2889,28 @@ def technical_archive_terms(text_value: str) -> list[str]:
     model_terms = archive_model_terms(text_value)
     family_terms = archive_family_terms(text_value)
     identifier_terms = archive_identifier_terms(text_value)
-    technical_words = [term for term in terms if term in TECHNICAL_ARCHIVE_WORDS]
 
-    if model_terms:
-        return (technical_words + family_terms + model_terms)[:8]
+    strict_technical = strict_technical_archive_words(text_value)
+    strict_families = strict_archive_family_terms(text_value)
 
-    if family_terms and technical_words:
-        # Ejemplos: "cps mototrbo", "crack mototrbo", "firmware apx".
-        return (technical_words + family_terms)[:8]
+    # Modelo explícito + señal técnica explícita: caso más seguro.
+    # Ej.: "CPS para EM200", "firmware DEP450".
+    if model_terms and strict_technical:
+        return (strict_technical + strict_families + model_terms)[:8]
 
-    if identifier_terms and technical_words:
-        # Ejemplo: "software KPG-D6".
-        return (technical_words + identifier_terms)[:8]
+    # Familia/plataforma explícita + señal técnica explícita.
+    # Ej.: "cps mototrbo", "crack mototrbo", "firmware apx".
+    if strict_families and strict_technical:
+        return (strict_technical + strict_families)[:8]
 
-    # Sin modelo/familia/identificador exigimos al menos dos pistas técnicas
-    # para no invadir conversaciones casuales del grupo.
-    if len(technical_words) >= 2:
-        return technical_words[:5]
+    # Identificador explícito + señal técnica explícita.
+    # Ej.: "software KPG-D6".
+    if identifier_terms and strict_technical:
+        return (strict_technical + identifier_terms)[:8]
 
+    # Para mensajes sin destino concreto, incluso dos palabras técnicas pueden
+    # ser conversación general. No hacemos búsqueda automática. Si el usuario
+    # nombra a Pecos, archive_query_from_natural_text puede pedir el destino.
     return []
 
 
@@ -2913,7 +2986,6 @@ async def send_archive_search_results(
             + ", pero no encontré un archivo que pueda asociar con suficiente seguridad "
               "a " + ("ese modelo" if len(missing_models) == 1 else "esos modelos") + "."
         )
-    lines.append("\n🤠 Pecos buscó por nombre y metadatos guardados; no abrió ni extrajo los RAR/ZIP/7Z.")
 
     await context.bot.send_message(chat_id=chat.id, text="\n\n".join(lines))
     db.add_history(
