@@ -65,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.3-conservative-smart-search"
+VERSION = "2.8.4-vhf-uhf-joke"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -5452,6 +5452,73 @@ async def handle_new_members(
     return True
 
 
+async def handle_band_conversion_joke(message: Message) -> bool:
+    """
+    Broma técnica para preguntas sobre convertir un equipo VHF a UHF o viceversa.
+
+    Solo se activa cuando aparecen ambas bandas y además hay una intención clara
+    de conversión. No se dispara por una conversación normal que simplemente
+    mencione VHF y UHF.
+    """
+    text_value = message.text or message.caption or ""
+    if not text_value or not message.from_user or message.from_user.is_bot:
+        return False
+
+    normalized = normalize_intent(text_value).strip()
+    if not normalized:
+        return False
+
+    has_vhf = bool(re.search(r"(?<!\w)vhf(?!\w)", normalized))
+    has_uhf = bool(re.search(r"(?<!\w)uhf(?!\w)", normalized))
+    if not (has_vhf and has_uhf):
+        return False
+
+    conversion_signal = bool(re.search(
+        r"\b(?:pasar|pasa|pasarlo|pasarla|convertir|convierto|convertirse|"
+        r"cambiar|cambio|cambiarlo|cambiarla|transformar|transformarlo|"
+        r"modificar|modificarlo|hacer|hacerlo)\b",
+        normalized,
+    ))
+    if not conversion_signal:
+        return False
+
+    # Exige una dirección de conversión reconocible.
+    vhf_to_uhf = bool(re.search(
+        r"(?:vhf.{0,40}(?:a|en|para)\s+uhf|de\s+vhf.{0,30}(?:a|en|para)\s+uhf)",
+        normalized,
+    ))
+    uhf_to_vhf = bool(re.search(
+        r"(?:uhf.{0,40}(?:a|en|para)\s+vhf|de\s+uhf.{0,30}(?:a|en|para)\s+vhf)",
+        normalized,
+    ))
+    if not (vhf_to_uhf or uhf_to_vhf):
+        return False
+
+    if vhf_to_uhf:
+        joke = (
+            "🤠 Pasar un VHF a UHF es casi como pedirle a un árbol que "
+            "florezca billetes… bonito sería, pero no funciona así, partner. 😂"
+        )
+        direction = "VHF → UHF"
+    else:
+        joke = (
+            "🤠 Pasar un UHF a VHF es casi como pedirle a un árbol que "
+            "florezca billetes… bonito sería, pero no funciona así, partner. 😂"
+        )
+        direction = "UHF → VHF"
+
+    await message.reply_text(
+        joke
+        + "\n\n📡 Normalmente no es un cambio de CPS o programación: "
+          "el equipo necesita hardware de RF diseñado para esa banda. "
+          "Si das el modelo exacto, Pecos puede revisar si existe alguna excepción o variante."
+    )
+    db.add_history(
+        f"BROMA CONVERSION BANDA {direction} | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
 async def handle_melerix_fun(message: Message) -> bool:
     """
     Broma especial para la palabra clave Melerix.
@@ -6087,6 +6154,16 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Usuario recién ingresado que pregunta antes de revisar reglas/archivos.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_new_member_question(message, context):
+            return
+
+    # Broma técnica para preguntas sobre convertir VHF <-> UHF.
+    # Responde solo ante una intención clara de conversión y luego detiene
+    # otros respondedores para evitar mensajes duplicados.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        if await handle_band_conversion_joke(message):
             return
 
     # Broma especial Melerix: una sola respuesta persistente por usuario.
