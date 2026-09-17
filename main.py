@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.10-directed-thanks"
+VERSION = "2.8.11-strict-multi-anchor-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -285,7 +285,7 @@ ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
 
 ARCHIVE_SEARCH_STOPWORDS = {
-    "pecos", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
+    "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
     "encuentra", "encuentrame", "tenemos", "tienes", "tienen", "hay", "algo",
     "archivo", "archivos", "para", "por", "favor", "favor", "del", "de", "la",
     "el", "los", "las", "un", "una", "unos", "unas", "que", "qué", "quiero",
@@ -3121,6 +3121,71 @@ def archive_search_score(file_name: str, terms: list[str]) -> float:
     return score
 
 
+def archive_required_content_anchors(query: str) -> list[str]:
+    """Obtiene anclas técnicas que deben cumplirse TODAS.
+
+    No incluye palabras genéricas de recurso como CPS, software o firmware,
+    porque un archivo puede estar nombrado como "programming software" y seguir
+    siendo válido. Sí incluye marcas/tecnologías explícitas como KENWOOD, DMR,
+    MOTOROLA, HYTERA, etc., e identificadores concretos como KPG-D6.
+
+    Ejemplo:
+        "kenwood dmr" -> ["kenwood", "dmr"]
+        "cps kenwood dmr" -> ["kenwood", "dmr"]
+        "software kpg-d6" -> ["kpg-d6"]
+    """
+    terms = extract_archive_terms(query)
+    models = set(archive_model_terms(query))
+    families = set(archive_family_terms(query))
+    identifiers = set(archive_identifier_terms(query))
+
+    anchors: list[str] = []
+    seen: set[str] = set()
+
+    for term in terms:
+        if term in models or term in families:
+            continue
+        if term in ARCHIVE_GENERIC_RESOURCE_TERMS:
+            continue
+        if term in {"bot"}:
+            continue
+
+        is_strong_technical = term in TECHNICAL_ARCHIVE_WORDS
+        is_identifier = term in identifiers
+
+        if (is_strong_technical or is_identifier) and term not in seen:
+            seen.add(term)
+            anchors.append(term)
+
+    return anchors[:6]
+
+
+def archive_name_matches_anchor(file_name: str, anchor: str) -> bool:
+    """Coincidencia conservadora de una ancla técnica con un nombre de archivo."""
+    name_norm = archive_normalized_name(file_name)
+    anchor_norm = archive_normalized_name(anchor)
+
+    if not name_norm or not anchor_norm:
+        return False
+
+    # Frases/identificadores: "kpg-d6" -> "kpg d6".
+    if " " in anchor_norm:
+        return bool(
+            re.search(
+                rf"(?:^|\s){re.escape(anchor_norm)}(?:$|\s)",
+                name_norm,
+            )
+        )
+
+    # Palabras simples: exige límite de token para evitar coincidencias parciales.
+    return bool(
+        re.search(
+            rf"(?:^|\s){re.escape(anchor_norm)}(?:$|\s)",
+            name_norm,
+        )
+    )
+
+
 def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MAX_RESULTS) -> list[sqlite3.Row]:
     terms = extract_archive_terms(query)
     if not terms:
@@ -3128,6 +3193,7 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
 
     requested_models = archive_model_terms(query)
     requested_families = archive_family_terms(query)
+    required_anchors = archive_required_content_anchors(query)
     ranked: list[tuple[float, sqlite3.Row]] = []
 
     for row in db.list_archive_fingerprints(chat_id):
@@ -3135,8 +3201,7 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         if not archive_file_allowed(file_name):
             continue
 
-        # Un modelo concreto es un ancla dura: no se ofrecen archivos de otra
-        # familia solo porque comparten palabras genéricas como CPS/firmware.
+        # Un modelo concreto es un ancla dura.
         matched_models = [
             model for model in requested_models
             if archive_name_matches_model(file_name, model)
@@ -3144,12 +3209,21 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         if requested_models and not matched_models:
             continue
 
-        # Lo mismo para familias/plataformas sin números (MOTOTRBO, APX, etc.).
+        # Una familia/plataforma concreta también es un ancla dura.
         matched_families = [
             family for family in requested_families
             if archive_name_matches_family(file_name, family)
         ]
         if requested_families and not matched_families:
+            continue
+
+        # NUEVO: cuando el usuario da varias anclas técnicas concretas,
+        # TODAS deben estar presentes. Ej.: "KENWOOD DMR" no acepta un archivo
+        # solo por contener "KENWOOD" o solo por contener "DMR".
+        if required_anchors and not all(
+            archive_name_matches_anchor(file_name, anchor)
+            for anchor in required_anchors
+        ):
             continue
 
         score = archive_search_score(file_name, terms)
@@ -3158,11 +3232,14 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
 
         score += 12.0 * len(matched_models)
         score += 9.0 * len(matched_families)
+        score += 8.0 * len(required_anchors)
         ranked.append((score, row))
 
-    ranked.sort(key=lambda pair: (pair[0], int(pair[1]["message_id"])), reverse=True)
+    ranked.sort(
+        key=lambda pair: (pair[0], int(pair[1]["message_id"])),
+        reverse=True,
+    )
     return [row for _, row in ranked[:max(1, min(12, limit))]]
-
 
 def human_file_size(size_value: int) -> str:
     size = max(0, int(size_value or 0))
@@ -3354,8 +3431,9 @@ async def send_archive_search_results(
         await context.bot.send_message(
             chat_id=chat.id,
             text=(
-                f"🌵 {usuario}, Pecos revisó el archivo del pueblo y no encontró coincidencias para "
-                f"«{' '.join(terms)}»."
+                f"🌵 {usuario}, Pecos revisó el archivo del pueblo y no encontró un archivo que "
+                f"cumpla suficientemente con «{' '.join(terms)}». Prefiero no mostrar coincidencias "
+                "parciales que puedan corresponder a otro equipo, marca o plataforma."
             ),
         )
         return True
