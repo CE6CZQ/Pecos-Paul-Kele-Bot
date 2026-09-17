@@ -42,6 +42,7 @@ from telegram import (
     BotCommandScopeAllPrivateChats,
     BotCommandScopeAllGroupChats,
     BotCommandScopeChat,
+    BotCommandScopeChatMember,
     Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -64,7 +65,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.0-history-memory-smart-archive"
+VERSION = "2.8.1-admin-history-solutions"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1867,20 +1868,43 @@ class Database:
                     params.append(f"%{term}%")
                 where_sql = " OR ".join(where_parts)
 
+            # Cada mensaje se une solo al mejor par Q/A relacionado. Esto evita
+            # que una misma consulta aparezca dos veces cuando tiene varias
+            # respuestas PROBABLE y una CONFIRMED.
             rows = self.conn.execute(
                 f"""
-                SELECT DISTINCT
+                SELECT
                     m.message_id, m.date_utc, m.sender_name, m.sender_username,
                     m.text, m.message_link,
                     c.primary_label, c.root_question_id,
                     q.status AS pair_status, q.confidence AS pair_confidence,
-                    q.question_message_id, q.answer_message_id
+                    q.question_message_id, q.answer_message_id,
+                    q.confirmation_message_id, q.reason AS pair_reason
                 FROM conversation_messages m
                 LEFT JOIN conversation_classifications c
                   ON c.chat_id=m.chat_id AND c.message_id=m.message_id
                 LEFT JOIN conversation_qa_pairs q
-                  ON q.chat_id=m.chat_id
-                 AND (q.question_message_id=m.message_id OR q.answer_message_id=m.message_id)
+                  ON q.rowid = (
+                      SELECT q2.rowid
+                      FROM conversation_qa_pairs q2
+                      WHERE q2.chat_id=m.chat_id
+                        AND (
+                            q2.question_message_id=m.message_id
+                            OR q2.answer_message_id=m.message_id
+                        )
+                      ORDER BY
+                        CASE q2.status
+                            WHEN 'CONFIRMED' THEN 1
+                            WHEN 'REJECTED' THEN 2
+                            WHEN 'WILL_TRY' THEN 3
+                            WHEN 'ACKNOWLEDGED' THEN 4
+                            WHEN 'PROBABLE' THEN 5
+                            ELSE 6
+                        END,
+                        COALESCE(q2.confidence,0) DESC,
+                        q2.answer_message_id DESC
+                      LIMIT 1
+                  )
                 WHERE m.chat_id=? AND ({where_sql})
                 ORDER BY
                     CASE
@@ -3120,7 +3144,19 @@ async def command_history_search(
 ) -> None:
     message = update.effective_message
     chat = update.effective_chat
+    user = update.effective_user
     if not message or not chat:
+        return
+
+    # Defensa adicional: /historial es una herramienta interna de Pecos y solo
+    # los ADMIN_USER_IDS configurados pueden ejecutarla.
+    if not user or not is_admin(user.id):
+        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await delete_group_command_invocation(message, context)
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="🔒 Esta función está disponible solo para administradores de Pecos.",
+            )
         return
 
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -3164,13 +3200,72 @@ async def command_history_search(
         return
 
     lines = [f"🧠 Pecos encontró {len(rows)} resultado(s) históricos para «{query}»:"]
-    for idx, row in enumerate(rows, start=1):
-        label = str(row["primary_label"] or "NORMAL")
+    shown_confirmed_pairs: set[tuple[int, int]] = set()
+    shown_messages: set[int] = set()
+    shown_count = 0
+
+    for row in rows:
+        message_id = int(row["message_id"] or 0)
+        if message_id in shown_messages:
+            continue
+
         status = str(row["pair_status"] or "")
+        question_id = int(row["question_message_id"] or 0)
+        answer_id = int(row["answer_message_id"] or 0)
+        confirmation_id = int(row["confirmation_message_id"] or 0)
+
+        # Si existe una solución confirmada, no mostramos solo la pregunta:
+        # presentamos pregunta + respuesta útil + confirmación del autor.
+        if status == "CONFIRMED" and question_id and answer_id:
+            pair_key = (question_id, answer_id)
+            if pair_key in shown_confirmed_pairs:
+                shown_messages.add(message_id)
+                continue
+
+            qrow = db.get_conversation_message(HISTORY_SOURCE_CHAT_ID, question_id)
+            arow = db.get_conversation_message(HISTORY_SOURCE_CHAT_ID, answer_id)
+            crow = (
+                db.get_conversation_message(HISTORY_SOURCE_CHAT_ID, confirmation_id)
+                if confirmation_id else None
+            )
+
+            if qrow and arow:
+                shown_count += 1
+                qtext = " ".join(str(qrow["text"] or "").split())
+                atext = " ".join(str(arow["text"] or "").split())
+                ctext = " ".join(str(crow["text"] or "").split()) if crow else ""
+                if len(qtext) > 280:
+                    qtext = qtext[:277] + "..."
+                if len(atext) > 500:
+                    atext = atext[:497] + "..."
+                if len(ctext) > 220:
+                    ctext = ctext[:217] + "..."
+
+                item = (
+                    f"{shown_count}. ✅ SOLUCIÓN CONFIRMADA\n"
+                    f"   ❓ Consulta: {qtext}\n"
+                    f"   💡 Solución: {atext}"
+                )
+                if ctext:
+                    item += f"\n   ✅ Confirmación: {ctext}"
+                if qrow["message_link"]:
+                    item += f"\n   🔗 Consulta: {qrow['message_link']}"
+                if arow["message_link"]:
+                    item += f"\n   🔗 Solución: {arow['message_link']}"
+                lines.append(item)
+                shown_confirmed_pairs.add(pair_key)
+                shown_messages.update({message_id, question_id, answer_id})
+                if confirmation_id:
+                    shown_messages.add(confirmation_id)
+                continue
+
+        shown_count += 1
+        shown_messages.add(message_id)
+        label = str(row["primary_label"] or "NORMAL")
         text_out = " ".join(str(row["text"] or "").split())
         if len(text_out) > 320:
             text_out = text_out[:317] + "..."
-        item = f"{idx}. [{label}"
+        item = f"{shown_count}. [{label}"
         if status:
             item += f" · {status}"
         item += f"] {text_out}"
@@ -5561,6 +5656,60 @@ async def enforce_allowed_groups(update: Update, context: ContextTypes.DEFAULT_T
     raise ApplicationHandlerStop
 
 
+PECOS_GROUP_MANUAL_COMMANDS = {
+    "start", "id", "config", "cancel", "encuesta", "recordar",
+    "recuerdos", "olvidar", "pecos", "buscar", "historial",
+    "consejo", "frase", "excusa", "pronostico",
+}
+
+
+async def enforce_admin_group_commands(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Bloquea los comandos manuales de Pecos para usuarios no administradores.
+
+    El comportamiento automático del bot (saludos, búsquedas naturales,
+    detección de consultas, duplicados, etc.) sigue disponible para todos los
+    miembros del grupo.
+    """
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat:
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+
+    text_value = (message.text or message.caption or "").strip()
+    if not text_value.startswith("/"):
+        return
+
+    token = text_value.split(maxsplit=1)[0][1:]
+    if not token:
+        return
+    if "@" in token:
+        command_name, bot_name = token.split("@", 1)
+        own_username = (getattr(context.bot, "username", "") or "").casefold()
+        if own_username and bot_name.casefold() != own_username:
+            return
+    else:
+        command_name = token
+
+    command_name = command_name.casefold()
+    if command_name not in PECOS_GROUP_MANUAL_COMMANDS:
+        return
+    if user and is_admin(user.id):
+        return
+
+    await delete_group_command_invocation(message, context)
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text="🔒 Esta función está disponible solo para administradores de Pecos.",
+    )
+    raise ApplicationHandlerStop
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
@@ -5812,12 +5961,30 @@ async def post_init(application: Application) -> None:
     )
 
 
-    # Los comandos de grupo se publican únicamente en los grupos autorizados.
+    # No exponemos el menú de comandos a usuarios normales del grupo.
+    # Cada administrador de Pecos recibe su propio scope ChatMember.
+    with contextlib.suppress(TelegramError):
+        await application.bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
+
+    # La versión anterior publicó comandos con scope por chat. Hay que borrar
+    # esos scopes explícitamente para que los usuarios normales dejen de verlos.
     for allowed_group_id in sorted(ALLOWED_GROUP_IDS):
-        await application.bot.set_my_commands(
-            group_commands,
-            scope=BotCommandScopeChat(allowed_group_id),
-        )
+        with contextlib.suppress(TelegramError):
+            await application.bot.delete_my_commands(
+                scope=BotCommandScopeChat(allowed_group_id),
+            )
+
+    if ADMIN_USER_IDS:
+        for allowed_group_id in sorted(ALLOWED_GROUP_IDS):
+            for admin_user_id in sorted(ADMIN_USER_IDS):
+                with contextlib.suppress(TelegramError):
+                    await application.bot.set_my_commands(
+                        group_commands,
+                        scope=BotCommandScopeChatMember(
+                            chat_id=allowed_group_id,
+                            user_id=admin_user_id,
+                        ),
+                    )
 
     if ADMIN_USER_IDS:
         admin_commands = [
@@ -5931,6 +6098,9 @@ def build_application() -> Application:
     # Barrera de seguridad: se ejecuta antes que cualquier otro handler.
     # Si Pecos es agregado a otro grupo, sale de él y no procesa el update.
     app.add_handler(TypeHandler(Update, enforce_allowed_groups), group=-100)
+    # Los comandos manuales dentro de los grupos quedan reservados a los
+    # administradores configurados de Pecos.
+    app.add_handler(TypeHandler(Update, enforce_admin_group_commands), group=-90)
 
     # Comandos.
     app.add_handler(CommandHandler("start", command_start), group=0)
