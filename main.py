@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.11-strict-multi-anchor-search"
+VERSION = "2.8.12-strict-identifier-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -3161,23 +3161,64 @@ def archive_required_content_anchors(query: str) -> list[str]:
 
 
 def archive_name_matches_anchor(file_name: str, anchor: str) -> bool:
-    """Coincidencia conservadora de una ancla técnica con un nombre de archivo."""
+    """Coincidencia conservadora de una ancla técnica con un nombre de archivo.
+
+    Para identificadores alfanuméricos permite variantes de separación:
+      KPG-D6 == KPGD6 == KPG D6
+
+    También acepta sufijos alfabéticos del mismo identificador, por ejemplo
+    KPG-D6N, pero NO cambia el número solicitado:
+      KPG-D6 != KPG-D3
+      KPG-D6 != KPG-67
+      KPG-D6 != KPG-D60
+    """
     name_norm = archive_normalized_name(file_name)
     anchor_norm = archive_normalized_name(anchor)
 
     if not name_norm or not anchor_norm:
         return False
 
-    # Frases/identificadores: "kpg-d6" -> "kpg d6".
-    if " " in anchor_norm:
-        return bool(
-            re.search(
-                rf"(?:^|\s){re.escape(anchor_norm)}(?:$|\s)",
-                name_norm,
-            )
-        )
+    anchor_compact = re.sub(r"[^a-z0-9]", "", anchor_norm)
 
-    # Palabras simples: exige límite de token para evitar coincidencias parciales.
+    # Identificador técnico con letras + números (ej.: kpgd6).
+    if (
+        len(anchor_compact) >= 4
+        and any(ch.isalpha() for ch in anchor_compact)
+        and any(ch.isdigit() for ch in anchor_compact)
+    ):
+        name_tokens = name_norm.split()
+
+        # Probamos tokens individuales y pequeñas secuencias contiguas para
+        # cubrir KPGD6, KPG-D6 y "KPG D6" sin recurrir a similitud difusa.
+        for start in range(len(name_tokens)):
+            combined = ""
+            for end in range(start, min(len(name_tokens), start + 3)):
+                combined += name_tokens[end]
+
+                if not combined.startswith(anchor_compact):
+                    # Puede que todavía falten caracteres del identificador.
+                    if anchor_compact.startswith(combined):
+                        continue
+                    break
+
+                suffix = combined[len(anchor_compact):]
+
+                # Exacto: KPGD6
+                if not suffix:
+                    return True
+
+                # Variante del mismo identificador con sufijo alfabético:
+                # KPGD6N, KPGD6SEND, etc.
+                # Si inmediatamente continúa otro dígito, es otro número:
+                # KPGD60 no corresponde a KPGD6.
+                if not suffix[0].isdigit():
+                    return True
+
+                return False
+
+        return False
+
+    # Palabras/frases sin identificador: coincidencia exacta por límites.
     return bool(
         re.search(
             rf"(?:^|\s){re.escape(anchor_norm)}(?:$|\s)",
