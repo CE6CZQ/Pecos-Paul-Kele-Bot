@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import difflib
 import hashlib
+import io
 from difflib import SequenceMatcher
 import logging
 import os
@@ -65,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.7-no-edited-auto-replies"
+VERSION = "2.8.8-member-activity"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1568,6 +1569,38 @@ class Database:
                 (chat_id, user_id),
             ).fetchone()
 
+    def get_activity_message_stats(self, chat_id: int) -> list[sqlite3.Row]:
+        """Actividad observada desde conversation_messages. Solo lectura."""
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT
+                    sender_id AS user_id,
+                    MAX(NULLIF(sender_name, '')) AS sender_name,
+                    MAX(NULLIF(sender_username, '')) AS sender_username,
+                    MIN(NULLIF(date_utc, '')) AS first_seen,
+                    MAX(NULLIF(date_utc, '')) AS last_seen,
+                    COUNT(*) AS message_count,
+                    SUM(CASE WHEN julianday(date_utc) >= julianday('now', '-30 days') THEN 1 ELSE 0 END) AS messages_30d
+                FROM conversation_messages
+                WHERE chat_id = ? AND sender_id > 0
+                GROUP BY sender_id
+                """,
+                (chat_id,),
+            ).fetchall()
+
+    def get_activity_profiles(self, chat_id: int) -> list[sqlite3.Row]:
+        """Perfiles recientes observados por Pecos. Solo lectura."""
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT user_id, username, display_name, first_seen, last_seen
+                FROM user_profiles
+                WHERE chat_id = ? AND user_id > 0
+                """,
+                (chat_id,),
+            ).fetchall()
+
     def claim_reputation_notice(self, chat_id: int, user_id: int, milestone: int) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
         with self.lock:
@@ -2129,6 +2162,188 @@ def get_user_metric(chat_id: int, user_id: int, counter_name: str) -> int:
 def normalize_intent(text: str) -> str:
     text = unicodedata.normalize("NFD", (text or "").lower())
     return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+
+
+def parse_activity_datetime(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                pass
+        if dt is None:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(BOT_TZ)
+
+
+def activity_age_days(last_seen: datetime | None) -> float:
+    if last_seen is None:
+        return float("inf")
+    delta = datetime.now(BOT_TZ) - last_seen
+    return max(0.0, delta.total_seconds() / 86400.0)
+
+
+def activity_status(last_seen: datetime | None) -> tuple[str, str]:
+    days = activity_age_days(last_seen)
+    if days <= 30:
+        return "🟢", "ACTIVO"
+    if days <= 90:
+        return "🟡", "POCO ACTIVO"
+    if days <= 180:
+        return "🟠", "INACTIVO"
+    return "🔴", "MUY INACTIVO"
+
+
+def human_activity_age(last_seen: datetime | None) -> str:
+    if last_seen is None:
+        return "sin fecha"
+    seconds = max(0, int((datetime.now(BOT_TZ) - last_seen).total_seconds()))
+    if seconds < 60:
+        return "hace menos de 1 minuto"
+    if seconds < 3600:
+        minutes = seconds // 60
+        return f"hace {minutes} min"
+    if seconds < 86400:
+        hours = seconds // 3600
+        return f"hace {hours} h"
+    days = seconds // 86400
+    if days < 60:
+        return f"hace {days} día{'s' if days != 1 else ''}"
+    if days < 730:
+        months = max(1, round(days / 30))
+        return f"hace ~{months} mes{'es' if months != 1 else ''}"
+    years = days / 365.25
+    return f"hace ~{years:.1f} años"
+
+
+def build_member_activity_snapshot(chat_id: int) -> list[dict[str, object]]:
+    entries: dict[int, dict[str, object]] = {}
+    for row in db.get_activity_message_stats(chat_id):
+        user_id = int(row["user_id"] or 0)
+        if user_id <= 0:
+            continue
+        entries[user_id] = {
+            "user_id": user_id,
+            "username": str(row["sender_username"] or "").lstrip("@"),
+            "display_name": str(row["sender_name"] or "").strip(),
+            "first_seen": parse_activity_datetime(row["first_seen"]),
+            "last_seen": parse_activity_datetime(row["last_seen"]),
+            "message_count": int(row["message_count"] or 0),
+            "messages_30d": int(row["messages_30d"] or 0),
+        }
+    for row in db.get_activity_profiles(chat_id):
+        user_id = int(row["user_id"] or 0)
+        if user_id <= 0:
+            continue
+        profile_first = parse_activity_datetime(row["first_seen"])
+        profile_last = parse_activity_datetime(row["last_seen"])
+        username = str(row["username"] or "").lstrip("@")
+        display = str(row["display_name"] or "").strip()
+        entry = entries.get(user_id)
+        if entry is None:
+            entries[user_id] = {
+                "user_id": user_id, "username": username, "display_name": display,
+                "first_seen": profile_first, "last_seen": profile_last,
+                "message_count": 0, "messages_30d": 0,
+            }
+            continue
+        current_first = entry.get("first_seen")
+        if profile_first and (not isinstance(current_first, datetime) or profile_first < current_first):
+            entry["first_seen"] = profile_first
+        current_last = entry.get("last_seen")
+        if profile_last and (not isinstance(current_last, datetime) or profile_last > current_last):
+            entry["last_seen"] = profile_last
+        if username:
+            entry["username"] = username
+        if display:
+            entry["display_name"] = display
+    rows = list(entries.values())
+    rows.sort(key=lambda x: x.get("last_seen") if isinstance(x.get("last_seen"), datetime) else datetime.min.replace(tzinfo=BOT_TZ), reverse=True)
+    return rows
+
+
+def activity_person_label(entry: dict[str, object]) -> str:
+    username = str(entry.get("username") or "").strip()
+    display = str(entry.get("display_name") or "").strip()
+    if username and display and display.casefold() != ("@" + username).casefold():
+        return f"{display} (@{username})"
+    if username:
+        return f"@{username}"
+    if display:
+        return display
+    return f"ID {entry.get('user_id', 0)}"
+
+
+def format_activity_timestamp(value: object) -> str:
+    if not isinstance(value, datetime):
+        return "sin fecha"
+    return value.strftime("%d/%m/%Y %H:%M")
+
+
+def find_activity_entries(entries: list[dict[str, object]], query: str) -> list[dict[str, object]]:
+    needle = normalize_intent(query).strip().lstrip("@")
+    if not needle:
+        return []
+    if needle.isdigit():
+        uid = int(needle)
+        return [e for e in entries if int(e.get("user_id") or 0) == uid]
+    exact, partial = [], []
+    for entry in entries:
+        username = normalize_intent(str(entry.get("username") or "")).lstrip("@")
+        display = normalize_intent(str(entry.get("display_name") or ""))
+        if needle == username or needle == display:
+            exact.append(entry)
+        elif needle in username or needle in display:
+            partial.append(entry)
+    return exact or partial
+
+
+def build_activity_text_report(chat_title: str, entries: list[dict[str, object]], *, inactive_days: int | None = None) -> str:
+    now_text = datetime.now(BOT_TZ).strftime("%d/%m/%Y %H:%M")
+    lines = [
+        "PECOS PAUL KELE - REPORTE DE ACTIVIDAD OBSERVADA",
+        f"Grupo: {chat_title}", f"Generado: {now_text} ({TIMEZONE_NAME})", "",
+        "IMPORTANTE:",
+        "Este informe NO representa la última conexión a Telegram.",
+        "Solo indica la última actividad que Pecos observó/registró en el grupo.",
+        "Un usuario que solo lee y no escribe puede parecer inactivo.",
+        "El listado histórico tampoco confirma que la persona siga siendo miembro.", "",
+        "Clasificación:", "ACTIVO = 0 a 30 días", "POCO ACTIVO = 31 a 90 días",
+        "INACTIVO = 91 a 180 días", "MUY INACTIVO = más de 180 días", "",
+    ]
+    selected = entries
+    if inactive_days is not None:
+        selected = [e for e in entries if activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"), datetime) else None) >= inactive_days]
+        selected.sort(key=lambda e: activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"), datetime) else None), reverse=True)
+        lines += [f"Filtro: sin actividad observada durante {inactive_days} días o más.", ""]
+    lines += [f"Usuarios incluidos: {len(selected)}", "=" * 78]
+    for index, entry in enumerate(selected, 1):
+        last_dt = entry.get("last_seen") if isinstance(entry.get("last_seen"), datetime) else None
+        icon, state = activity_status(last_dt)
+        lines += [
+            f"{index}. {icon} {state} | {activity_person_label(entry)}",
+            f"   User ID: {int(entry.get('user_id') or 0)}",
+            f"   Última actividad observada: {format_activity_timestamp(last_dt)} ({human_activity_age(last_dt)})",
+            f"   Mensajes registrados en memoria: {int(entry.get('message_count') or 0)}",
+            f"   Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}", "",
+        ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def telegram_member_status_label(status: str) -> str:
+    labels = {"creator":"propietario", "owner":"propietario", "administrator":"administrador", "member":"miembro", "restricted":"restringido", "left":"salió del grupo", "kicked":"expulsado/bloqueado"}
+    return labels.get((status or "").casefold(), status or "desconocido")
 
 
 PECOS_USERNAME_ALIASES = {"pecos_paul_kele_bot"}
@@ -4093,6 +4308,92 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await respond(
             "No encontré ese recuerdo o no tienes permiso para borrarlo."
         )
+
+
+async def command_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not message or not chat:
+        return
+    if not user or not is_admin(user.id):
+        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await delete_group_command_invocation(message, context)
+            await context.bot.send_message(chat_id=chat.id, text="🔒 Esta función está disponible solo para administradores de Pecos.")
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("📊 /actividad se utiliza dentro de un grupo autorizado.")
+        return
+    await delete_group_command_invocation(message, context)
+    entries = build_member_activity_snapshot(chat.id)
+    if not entries:
+        await context.bot.send_message(chat_id=chat.id, text="📊 Pecos todavía no tiene actividad observada para este grupo.")
+        return
+    query = " ".join(context.args).strip()
+    if query:
+        matches = find_activity_entries(entries, query)
+        if not matches:
+            await context.bot.send_message(chat_id=chat.id, text=f"📊 No encontré actividad registrada para «{query}».")
+            return
+        if len(matches) > 1:
+            sample = "\n".join(f"• {activity_person_label(e)} · ID {e['user_id']}" for e in matches[:8])
+            await context.bot.send_message(chat_id=chat.id, text=f"📊 Encontré varias coincidencias para «{query}»:\n{sample}\n\nUsa /actividad @usuario o /actividad USER_ID para precisar.")
+            return
+        entry = matches[0]
+        last_seen = entry.get("last_seen") if isinstance(entry.get("last_seen"), datetime) else None
+        icon, state = activity_status(last_seen)
+        member_status = "no verificado"
+        try:
+            member = await context.bot.get_chat_member(chat_id=chat.id, user_id=int(entry["user_id"]))
+            member_status = telegram_member_status_label(str(member.status))
+        except TelegramError:
+            pass
+        await context.bot.send_message(chat_id=chat.id, text=(
+            f"📊 Actividad observada de {activity_person_label(entry)}\n\n"
+            f"{icon} Estado por actividad: {state}\n"
+            f"🕒 Última actividad observada: {format_activity_timestamp(last_seen)} ({human_activity_age(last_seen)})\n"
+            f"💬 Mensajes registrados: {int(entry.get('message_count') or 0)}\n"
+            f"📅 Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}\n"
+            f"👥 Estado actual consultado a Telegram: {member_status}\n"
+            f"🆔 User ID: {int(entry['user_id'])}\n\n"
+            "ℹ️ Esto no es la «última conexión» de Telegram; es la última actividad que Pecos pudo observar en el grupo."
+        ))
+        return
+    buckets={"ACTIVO":0,"POCO ACTIVO":0,"INACTIVO":0,"MUY INACTIVO":0}
+    for entry in entries:
+        last_seen=entry.get("last_seen") if isinstance(entry.get("last_seen"),datetime) else None
+        _, state=activity_status(last_seen); buckets[state]+=1
+    report=build_activity_text_report(chat.title or str(chat.id), entries)
+    payload=io.BytesIO(report.encode("utf-8-sig")); payload.name="pecos_actividad_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
+    caption=(f"📊 Actividad observada por Pecos\n👥 Usuarios con registro: {len(entries)}\n🟢 Activos (0–30 d): {buckets['ACTIVO']}\n🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n📄 Adjunto va el detalle completo.\nℹ️ Mide actividad observada, no última conexión a Telegram.")
+    await context.bot.send_document(chat_id=chat.id, document=payload, caption=caption)
+
+
+async def command_inactive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not message or not chat:
+        return
+    if not user or not is_admin(user.id):
+        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await delete_group_command_invocation(message, context)
+            await context.bot.send_message(chat_id=chat.id, text="🔒 Esta función está disponible solo para administradores de Pecos.")
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text("📊 /inactivos se utiliza dentro de un grupo autorizado.")
+        return
+    await delete_group_command_invocation(message, context)
+    days=90
+    if context.args:
+        try: days=int(context.args[0])
+        except ValueError:
+            await context.bot.send_message(chat_id=chat.id,text="Uso: /inactivos 90\nEl número corresponde a días sin actividad observada."); return
+    if not 1 <= days <= 3650:
+        await context.bot.send_message(chat_id=chat.id,text="El rango permitido es entre 1 y 3650 días."); return
+    entries=build_member_activity_snapshot(chat.id)
+    inactive=[e for e in entries if activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"),datetime) else None)>=days]
+    if not inactive:
+        await context.bot.send_message(chat_id=chat.id,text=f"📊 No encontré usuarios con {days} días o más sin actividad observada."); return
+    report=build_activity_text_report(chat.title or str(chat.id),entries,inactive_days=days)
+    payload=io.BytesIO(report.encode("utf-8-sig")); payload.name=f"pecos_inactivos_{days}d_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
+    await context.bot.send_document(chat_id=chat.id,document=payload,caption=(f"📊 Pecos encontró {len(inactive)} usuario(s) con {days} días o más sin actividad observada.\n\n📄 Adjunto va el detalle.\nℹ️ No significa que no entren a Telegram ni que sigan siendo miembros; solo que Pecos no ha observado actividad reciente de ellos en el grupo."))
 
 
 async def command_search_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6193,6 +6494,7 @@ PECOS_GROUP_MANUAL_COMMANDS = {
     "start", "id", "config", "cancel", "encuesta", "recordar",
     "recuerdos", "olvidar", "pecos", "buscar", "historial",
     "consejo", "frase", "excusa", "pronostico",
+    "actividad", "inactivos",
 }
 
 
@@ -6507,6 +6809,8 @@ async def post_init(application: Application) -> None:
         BotCommand("pecos", "Llamar a Pecos"),
         BotCommand("buscar", "Buscar archivos históricos"),
         BotCommand("historial", "Buscar conversaciones históricas"),
+        BotCommand("actividad", "Ver actividad observada del grupo"),
+        BotCommand("inactivos", "Listar usuarios sin actividad reciente"),
         BotCommand("consejo", "Pedir un consejo a Pecos"),
         BotCommand("frase", "Frase de Pecos"),
         BotCommand("excusa", "Generar una excusa"),
@@ -6674,6 +6978,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("pecos", command_pecos), group=0)
     app.add_handler(CommandHandler("buscar", command_search_archive), group=0)
     app.add_handler(CommandHandler("historial", command_history_search), group=0)
+    app.add_handler(CommandHandler("actividad", command_activity), group=0)
+    app.add_handler(CommandHandler("inactivos", command_inactive), group=0)
     app.add_handler(CommandHandler("consejo", command_advice), group=0)
     app.add_handler(CommandHandler("frase", command_phrase), group=0)
     app.add_handler(CommandHandler("excusa", command_excuse), group=0)
