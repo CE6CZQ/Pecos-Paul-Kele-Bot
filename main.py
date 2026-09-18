@@ -67,7 +67,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.22-custom-qa-panel"
+VERSION = "2.8.23-recurring-silence"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1002,6 +1002,18 @@ class Database:
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, local_date)
             );
+
+            CREATE TABLE IF NOT EXISTS silence_interval_notices (
+                chat_id INTEGER NOT NULL,
+                activity_anchor TEXT NOT NULL,
+                interval_hours INTEGER NOT NULL,
+                slot INTEGER NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, activity_anchor, interval_hours, slot)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_silence_interval_chat
+                ON silence_interval_notices(chat_id, activity_anchor);
 
 
             CREATE TABLE IF NOT EXISTS user_profiles (
@@ -2384,6 +2396,71 @@ class Database:
             self.conn.commit()
         return inserted
 
+    def claim_silence_interval(
+        self,
+        chat_id: int,
+        activity_anchor: str,
+        interval_hours: int,
+        slot: int,
+    ) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                DELETE FROM silence_interval_notices
+                WHERE chat_id = ?
+                  AND (activity_anchor <> ? OR interval_hours <> ?)
+                """,
+                (chat_id, activity_anchor, interval_hours),
+            )
+
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO silence_interval_notices(
+                    chat_id, activity_anchor, interval_hours, slot, sent_at
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (chat_id, activity_anchor, interval_hours, slot, now),
+            )
+            inserted = self.conn.total_changes > before
+
+            if inserted:
+                self.conn.execute(
+                    """
+                    DELETE FROM silence_interval_notices
+                    WHERE chat_id = ?
+                      AND activity_anchor = ?
+                      AND interval_hours = ?
+                      AND slot < ?
+                    """,
+                    (chat_id, activity_anchor, interval_hours, max(1, slot - 2)),
+                )
+
+            self.conn.commit()
+        return inserted
+
+    def release_silence_interval(
+        self,
+        chat_id: int,
+        activity_anchor: str,
+        interval_hours: int,
+        slot: int,
+    ) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                DELETE FROM silence_interval_notices
+                WHERE chat_id = ?
+                  AND activity_anchor = ?
+                  AND interval_hours = ?
+                  AND slot = ?
+                """,
+                (chat_id, activity_anchor, interval_hours, slot),
+            )
+            self.conn.commit()
+
     def claim_daily_user_event(
         self,
         event_key: str,
@@ -3072,7 +3149,11 @@ def format_hours_value(hours: float) -> str:
 
 
 def build_silence_message(elapsed_hours: float) -> str:
-    template = random.choice(get_humor_pool("silence"))
+    template = choose_random(
+        "silence",
+        get_humor_pool("silence"),
+        "grupo",
+    )
     return template.replace("{horas}", format_hours_value(elapsed_hours))
 
 
@@ -7600,8 +7681,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             query,
             "🌵 Detector de silencio\n\n"
             f"Estado: {'ACTIVO' if db.is_true('silence_enabled') else 'DESACTIVADO'}\n"
-            f"Tiempo: {db.get_setting('silence_hours', '8')} hora(s)\n"
-            "Máximo: una intervención por grupo al día\n"
+            f"Intervalo: cada {db.get_setting('silence_hours', '8')} hora(s) de silencio\n"
+            "Repite mientras el grupo continúe en silencio.\n"
+            "El contador se reinicia cuando alguien interviene.\n"
             "Horario: 09:00–22:00",
             silence_menu(),
         )
@@ -7617,8 +7699,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             query,
             "🌵 Detector de silencio\n\n"
             f"Estado: {'ACTIVO' if enabled else 'DESACTIVADO'}\n"
-            f"Tiempo: {db.get_setting('silence_hours', '8')} hora(s)\n"
-            "Máximo: una intervención por grupo al día\n"
+            f"Intervalo: cada {db.get_setting('silence_hours', '8')} hora(s) de silencio\n"
+            "Repite mientras el grupo continúe en silencio.\n"
+            "El contador se reinicia cuando alguien interviene.\n"
             "Horario: 09:00–22:00",
             silence_menu(),
         )
@@ -7627,9 +7710,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "silence:hours":
         PENDING_ADMIN_ACTION[user_id] = "silence:hours"
         await query.message.reply_text(
-            "⏱️ ¿Después de cuántas horas de silencio debe hablar Pecos?\n\n"
+            "⏱️ ¿Cada cuántas horas de silencio debe hablar Pecos?\n\n"
+            "Mientras nadie intervenga, repetirá un mensaje al completar cada intervalo.\n"
             "Escribe un número entre 1 y 72.\n"
-            "Ejemplo: 8\n\nUsa /cancel para cancelar."
+            "Ejemplo: 1 = una intervención por cada hora completa de silencio.\n\n"
+            "Usa /cancel para cancelar."
         )
         return
 
@@ -7704,7 +7789,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Bromas internas: {len(db.list_jokes())}\n"
             f"Preguntas/respuestas personalizadas: {len(db.list_custom_qa())}\n"
             f"Detector de silencio: {'Activo' if db.is_true('silence_enabled') else 'Desactivado'} "
-            f"({db.get_setting('silence_hours', '8')} h)\n"
+            f"(cada {db.get_setting('silence_hours', '8')} h mientras continúe el silencio)\n"
             f"Duplicados: {'Activo' if db.is_true('duplicates_enabled') else 'Desactivado'}\n"
             f"FileUniqueId registrados: {unique_count}\n"
             f"SHA-256 registrados: {hash_count}\n"
@@ -9724,7 +9809,9 @@ async def check_group_silence(application: Application) -> None:
 
     now = datetime.now(BOT_TZ)
 
-    # Evita que Pecos rompa el silencio durante la madrugada.
+    # Mantener el horario histórico de la función. Si hubo silencio durante
+    # la noche, al volver a las 09:00 no se envían mensajes atrasados en masa:
+    # se envía como máximo el aviso correspondiente al intervalo actual.
     if not (9 <= now.hour < 22):
         return
 
@@ -9734,35 +9821,56 @@ async def check_group_silence(application: Application) -> None:
         silence_hours = 8
 
     silence_hours = max(1, min(72, silence_hours))
-    today = now.strftime("%Y-%m-%d")
 
     for row in db.list_groups():
-        if int(row["chat_id"]) not in ALLOWED_GROUP_IDS:
+        chat_id = int(row["chat_id"])
+        if chat_id not in ALLOWED_GROUP_IDS:
+            continue
+
+        activity_anchor = str(row["last_seen"] or "").strip()
+        if not activity_anchor:
             continue
 
         try:
-            last_seen = datetime.fromisoformat(str(row["last_seen"]))
+            last_seen = datetime.fromisoformat(activity_anchor)
         except Exception:
             continue
 
-        elapsed_hours = (now - last_seen).total_seconds() / 3600.0
-
+        elapsed_hours = max(0.0, (now - last_seen).total_seconds() / 3600.0)
         if elapsed_hours < silence_hours:
             continue
 
-        if not db.claim_silence_notice(int(row["chat_id"]), today):
+        # Con intervalo de 1 h: slot 1 a la primera hora, slot 2 a las dos, etc.
+        slot = int(elapsed_hours // silence_hours)
+        if slot < 1:
+            continue
+
+        if not db.claim_silence_interval(
+            chat_id,
+            activity_anchor,
+            silence_hours,
+            slot,
+        ):
             continue
 
         try:
             await application.bot.send_message(
-                chat_id=int(row["chat_id"]),
+                chat_id=chat_id,
                 text=build_silence_message(elapsed_hours),
             )
             db.add_history(
-                f"SILENCIO: Pecos habló en {row['title']} tras {elapsed_hours:.1f} h."
+                f"SILENCIO RECURRENTE: Pecos habló en {row['title']} "
+                f"| intervalo={silence_hours} h | slot={slot} "
+                f"| silencio={elapsed_hours:.1f} h."
             )
         except TelegramError as exc:
-            log.warning("No se pudo romper el silencio en %s: %s", row["chat_id"], exc)
+            db.release_silence_interval(
+                chat_id,
+                activity_anchor,
+                silence_hours,
+                slot,
+            )
+            log.warning("No se pudo romper el silencio en %s: %s", chat_id, exc)
 
 
 async def daily_loop(application: Application) -> None:
