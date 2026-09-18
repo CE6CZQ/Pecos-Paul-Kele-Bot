@@ -67,7 +67,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.21-humor-list-editor"
+VERSION = "2.8.22-custom-qa-panel"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -964,6 +964,21 @@ class Database:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS custom_qa (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question TEXT NOT NULL,
+                normalized_question TEXT NOT NULL,
+                match_type TEXT NOT NULL CHECK(match_type IN ('EXACT', 'CONTAINS')),
+                response TEXT NOT NULL,
+                created_by INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(normalized_question, match_type)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_custom_qa_match
+                ON custom_qa(match_type, normalized_question);
+
             CREATE TABLE IF NOT EXISTS fun_keyword_usage (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -1673,6 +1688,95 @@ class Database:
             )
             self.conn.commit()
         return cur.rowcount > 0
+
+    def list_custom_qa(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT id, question, normalized_question, match_type, response,
+                       created_by, created_at, updated_at
+                FROM custom_qa
+                ORDER BY id
+                """
+            ).fetchall()
+
+    def add_custom_qa(
+        self,
+        question: str,
+        normalized_question: str,
+        match_type: str,
+        response: str,
+        created_by: int,
+    ) -> int | None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        try:
+            with self.lock:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO custom_qa(
+                        question, normalized_question, match_type, response,
+                        created_by, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        question.strip(),
+                        normalized_question.strip(),
+                        match_type,
+                        response.strip(),
+                        int(created_by),
+                        now,
+                        now,
+                    ),
+                )
+                self.conn.commit()
+                return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+
+    def update_custom_qa(
+        self,
+        qa_id: int,
+        question: str,
+        normalized_question: str,
+        match_type: str,
+        response: str,
+    ) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        try:
+            with self.lock:
+                cur = self.conn.execute(
+                    """
+                    UPDATE custom_qa
+                    SET question = ?, normalized_question = ?, match_type = ?,
+                        response = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        question.strip(),
+                        normalized_question.strip(),
+                        match_type,
+                        response.strip(),
+                        now,
+                        int(qa_id),
+                    ),
+                )
+                self.conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+    def remove_custom_qa(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.lock:
+            cur = self.conn.execute(
+                f"DELETE FROM custom_qa WHERE id IN ({placeholders})",
+                tuple(int(x) for x in ids),
+            )
+            self.conn.commit()
+        return int(cur.rowcount)
 
     def add_memory(
         self,
@@ -2551,6 +2655,91 @@ def get_user_metric(chat_id: int, user_id: int, counter_name: str) -> int:
 def normalize_intent(text: str) -> str:
     text = unicodedata.normalize("NFD", (text or "").lower())
     return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+
+
+def normalize_custom_qa_text(text_value: str) -> str:
+    """Normaliza preguntas configurables e ignora la llamada a Pecos.
+
+    Hace equivalentes, por ejemplo:
+    - Pecos como van las empanadas?
+    - Pecos, ¿cómo van las empanadas?
+    - como van las empanadas
+    """
+    normalized = normalize_intent(text_value or "").lower()
+
+    # Quitar @username conocido del bot antes de limpiar signos.
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            normalized = re.sub(
+                rf"(?<![a-z0-9_])@?{re.escape(alias_norm)}(?![a-z0-9_])",
+                " ",
+                normalized,
+            )
+
+    # Pecos/Peco pueden aparecer al inicio o al final; se eliminan como vocativo.
+    normalized = re.sub(r"(?<![a-z0-9_])(?:pecos|peco)(?![a-z0-9_])", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def parse_custom_qa_match_type(value: str) -> str | None:
+    token = normalize_intent(value or "").strip().upper()
+    if token in {"EXACT", "EXACTA", "EXACTO"}:
+        return "EXACT"
+    if token in {"CONTAINS", "CONTIENE", "CONTENGA"}:
+        return "CONTAINS"
+    return None
+
+
+def custom_qa_match_label(value: str) -> str:
+    return "EXACTA" if value == "EXACT" else "CONTIENE"
+
+
+def format_custom_qa_list() -> str:
+    rows = db.list_custom_qa()
+    if not rows:
+        return (
+            "💬 Preguntas y respuestas\n\n"
+            "No hay respuestas personalizadas configuradas todavía."
+        )
+
+    lines = [f"💬 Preguntas y respuestas\n\nConfiguradas: {len(rows)}"]
+    for row in rows:
+        lines.append(
+            f"ID {row['id']} — [{custom_qa_match_label(str(row['match_type']))}]\n"
+            f"Pregunta: {row['question']}\n"
+            f"Respuesta: {row['response']}"
+        )
+    return "\n\n".join(lines)
+
+
+def find_custom_qa_response(text_value: str) -> sqlite3.Row | None:
+    candidate = normalize_custom_qa_text(text_value)
+    if not candidate:
+        return None
+
+    rows = db.list_custom_qa()
+
+    # EXACTA siempre tiene prioridad sobre CONTIENE.
+    for row in rows:
+        if str(row["match_type"]) != "EXACT":
+            continue
+        if candidate == str(row["normalized_question"]):
+            return row
+
+    # En CONTIENE gana la frase más específica (la más larga).
+    contains_rows = sorted(
+        (row for row in rows if str(row["match_type"]) == "CONTAINS"),
+        key=lambda row: len(str(row["normalized_question"])),
+        reverse=True,
+    )
+    for row in contains_rows:
+        needle = str(row["normalized_question"]).strip()
+        if needle and needle in candidate:
+            return row
+
+    return None
 
 
 def parse_activity_datetime(value: object) -> datetime | None:
@@ -5697,6 +5886,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📝 Palabras restringidas", callback_data="menu:words")],
             [InlineKeyboardButton("🕘 Mensaje diario", callback_data="menu:daily")],
+            [InlineKeyboardButton("💬 Preguntas y respuestas", callback_data="menu:qa")],
             [
                 InlineKeyboardButton("📊 Ver estado", callback_data="menu:status"),
                 InlineKeyboardButton("📜 Historial", callback_data="menu:history"),
@@ -5744,6 +5934,22 @@ def words_menu() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("➖ Eliminar", callback_data="words:remove"),
                 InlineKeyboardButton("🧹 Borrar todas", callback_data="words:clear_confirm"),
+            ],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
+def qa_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 Ver respuestas", callback_data="qa:list"),
+                InlineKeyboardButton("➕ Agregar", callback_data="qa:add"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Editar por ID", callback_data="qa:edit"),
+                InlineKeyboardButton("➖ Eliminar por ID", callback_data="qa:remove"),
             ],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
         ]
@@ -6409,6 +6615,124 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return True
 
+    if action == "qa:add":
+        parts = [part.strip() for part in text.split("|", 2)]
+        if len(parts) != 3:
+            await message.reply_text(
+                "Formato inválido. Usa:\n"
+                "EXACTA | pregunta | respuesta\n"
+                "o\n"
+                "CONTIENE | frase detonante | respuesta\n\n"
+                "Ejemplo:\n"
+                "EXACTA | como van las empanadas | 🥟🤠 Van avanzando, partner.\n\n"
+                "Usa /cancel para cancelar."
+            )
+            return True
+
+        match_type = parse_custom_qa_match_type(parts[0])
+        question = parts[1]
+        response = parts[2]
+        normalized_question = normalize_custom_qa_text(question)
+
+        if not match_type or not normalized_question or not response:
+            await message.reply_text(
+                "Revisa el tipo, la pregunta y la respuesta. El tipo debe ser EXACTA o CONTIENE."
+            )
+            return True
+        if match_type == "CONTAINS" and len(normalized_question) < 4:
+            await message.reply_text(
+                "Para CONTIENE usa una frase de al menos 4 caracteres para evitar activaciones accidentales."
+            )
+            return True
+        if len(question) > 500 or len(response) > 3500:
+            await message.reply_text("Pregunta o respuesta demasiado larga.")
+            return True
+
+        qa_id = db.add_custom_qa(
+            question, normalized_question, match_type, response, user.id
+        )
+        if qa_id is None:
+            await message.reply_text(
+                "Ya existe una regla con esa misma pregunta y tipo. Puedes editarla por ID."
+            )
+            return True
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: agregó QA personalizada ID {qa_id}.")
+        await message.reply_text(
+            f"✅ Pregunta/respuesta guardada con ID {qa_id}.",
+            reply_markup=qa_menu(),
+        )
+        return True
+
+    if action == "qa:edit":
+        parts = [part.strip() for part in text.split("|", 3)]
+        if len(parts) != 4 or not parts[0].isdigit():
+            await message.reply_text(
+                "Formato inválido. Usa:\n"
+                "ID | EXACTA | pregunta | respuesta\n"
+                "o\n"
+                "ID | CONTIENE | frase detonante | respuesta\n\n"
+                "Ejemplo:\n"
+                "3 | EXACTA | como van las empanadas | 🥟🤠 Pecos sigue haciendo control de calidad.\n\n"
+                "Usa /cancel para cancelar."
+            )
+            return True
+
+        qa_id = int(parts[0])
+        match_type = parse_custom_qa_match_type(parts[1])
+        question = parts[2]
+        response = parts[3]
+        normalized_question = normalize_custom_qa_text(question)
+
+        if not match_type or not normalized_question or not response:
+            await message.reply_text("Revisa ID, tipo, pregunta y respuesta.")
+            return True
+        if match_type == "CONTAINS" and len(normalized_question) < 4:
+            await message.reply_text("Para CONTIENE usa una frase de al menos 4 caracteres.")
+            return True
+        if len(question) > 500 or len(response) > 3500:
+            await message.reply_text("Pregunta o respuesta demasiado larga.")
+            return True
+
+        updated = db.update_custom_qa(
+            qa_id, question, normalized_question, match_type, response
+        )
+        if not updated:
+            await message.reply_text(
+                "No pude actualizar ese ID. Puede no existir o duplicar otra regla ya configurada."
+            )
+            return True
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: editó QA personalizada ID {qa_id}.")
+        await message.reply_text(
+            f"✅ Pregunta/respuesta ID {qa_id} actualizada.",
+            reply_markup=qa_menu(),
+        )
+        return True
+
+    if action == "qa:remove":
+        ids = sorted({
+            int(token)
+            for token in re.split(r"[,;\s]+", text)
+            if token.strip().isdigit()
+        })
+        if not ids:
+            await message.reply_text(
+                "Envíame uno o más ID. Ejemplo: 2, 5, 8\n\nUsa /cancel para cancelar."
+            )
+            return True
+
+        removed = db.remove_custom_qa(ids)
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: eliminó {removed} QA personalizada(s).")
+        await message.reply_text(
+            f"✅ Se eliminaron {removed} pregunta(s)/respuesta(s).",
+            reply_markup=qa_menu(),
+        )
+        return True
+
     if action.startswith("humor:edit:"):
         pool_key = action.split(":", 2)[2]
         if not humor_pool_exists(pool_key):
@@ -6962,6 +7286,61 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(help_text)
         return
 
+    if data == "menu:qa":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await safe_edit(
+            query,
+            "💬 Preguntas y respuestas de Pecos\n\n"
+            f"Configuradas: {len(db.list_custom_qa())}\n\n"
+            "EXACTA: responde cuando la pregunta coincide completa.\n"
+            "CONTIENE: responde cuando la frase aparece dentro de un mensaje más largo.",
+            qa_menu(),
+        )
+        return
+
+    if data == "qa:list":
+        await send_long_text(chat.id, format_custom_qa_list(), context)
+        await query.message.reply_text("Opciones:", reply_markup=qa_menu())
+        return
+
+    if data == "qa:add":
+        PENDING_ADMIN_ACTION[user_id] = "qa:add"
+        await query.message.reply_text(
+            "➕ Agregar pregunta/respuesta\n\n"
+            "Formato:\n"
+            "EXACTA | pregunta | respuesta\n"
+            "o\n"
+            "CONTIENE | frase detonante | respuesta\n\n"
+            "Ejemplo:\n"
+            "EXACTA | como van las empanadas | 🥟🤠 Van avanzando, partner. Pecos ya hizo control de calidad.\n\n"
+            "Pecos ignora tildes, signos y su propio nombre al comparar.\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "qa:edit":
+        PENDING_ADMIN_ACTION[user_id] = "qa:edit"
+        await query.message.reply_text(
+            "✏️ Editar pregunta/respuesta\n\n"
+            "Formato:\n"
+            "ID | EXACTA | pregunta | respuesta\n"
+            "o\n"
+            "ID | CONTIENE | frase detonante | respuesta\n\n"
+            "Consulta los ID con «Ver respuestas».\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "qa:remove":
+        PENDING_ADMIN_ACTION[user_id] = "qa:remove"
+        await query.message.reply_text(
+            "➖ Eliminar pregunta/respuesta\n\n"
+            "Envíame uno o varios ID.\n"
+            "Ejemplo: 2, 5, 8\n\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
     if data == "menu:humor":
         PENDING_ADMIN_ACTION.pop(user_id, None)
         await safe_edit(
@@ -7323,6 +7702,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Bot API: {'LOCAL integrada (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
             f"Archivos de hash: temporal ({TELEGRAM_FILES_DIR})\n"
             f"Bromas internas: {len(db.list_jokes())}\n"
+            f"Preguntas/respuestas personalizadas: {len(db.list_custom_qa())}\n"
             f"Detector de silencio: {'Activo' if db.is_true('silence_enabled') else 'Desactivado'} "
             f"({db.get_setting('silence_hours', '8')} h)\n"
             f"Duplicados: {'Activo' if db.is_true('duplicates_enabled') else 'Desactivado'}\n"
@@ -8536,6 +8916,23 @@ async def handle_xerax_fun(message: Message) -> bool:
     return True
 
 
+async def handle_custom_qa(message: Message) -> bool:
+    """Responde reglas configuradas desde /config antes de respuestas genéricas."""
+    text_value = message.text or message.caption or ""
+    if not text_value:
+        return False
+
+    row = find_custom_qa_response(text_value)
+    if not row:
+        return False
+
+    await message.reply_text(str(row["response"]))
+    db.add_history(
+        f"QA PERSONALIZADA ID {row['id']} | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
 async def handle_internal_joke(message: Message) -> bool:
     text_value = message.text or message.caption or ""
     if not text_value:
@@ -9287,6 +9684,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         if await handle_internal_joke(message):
+            return
+
+    # Preguntas/respuestas configuradas por el administrador tienen prioridad
+    # sobre búsquedas técnicas y respuestas genéricas de Pecos.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_custom_qa(message):
             return
 
     if await handle_identity(message, context):
