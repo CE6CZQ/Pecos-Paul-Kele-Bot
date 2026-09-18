@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.12-strict-identifier-search"
+VERSION = "2.8.13-admin-dashboard"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1371,6 +1371,86 @@ class Database:
                 "SELECT COUNT(*) AS n FROM file_fingerprints"
             ).fetchone()["n"]
         return int(unique_count), int(hash_count)
+
+    def admin_memory_stats(self, chat_id: int) -> dict[str, object]:
+        """Resumen de memoria histórica para el panel de administración.
+
+        SOLO LECTURA: no modifica ninguna tabla ni la lógica de duplicados.
+        """
+        with self.lock:
+            messages = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM conversation_messages WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()["n"]
+            )
+            classifications = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM conversation_classifications WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()["n"]
+            )
+            pairs = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM conversation_qa_pairs WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()["n"]
+            )
+            users = int(
+                self.conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT sender_id) AS n
+                    FROM conversation_messages
+                    WHERE chat_id = ? AND sender_id > 0
+                    """,
+                    (chat_id,),
+                ).fetchone()["n"]
+            )
+            status_rows = self.conn.execute(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM conversation_qa_pairs
+                WHERE chat_id = ?
+                GROUP BY status
+                """,
+                (chat_id,),
+            ).fetchall()
+            fingerprints = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM file_fingerprints WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()["n"]
+            )
+
+        statuses = {
+            str(row["status"] or "").upper(): int(row["n"] or 0)
+            for row in status_rows
+        }
+
+        return {
+            "messages": messages,
+            "classifications": classifications,
+            "pairs": pairs,
+            "users": users,
+            "fingerprints": fingerprints,
+            "statuses": statuses,
+        }
+
+    def known_group_title(self, chat_id: int) -> str:
+        """Nombre conocido del grupo para reportes privados. SOLO LECTURA."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT title FROM known_groups WHERE chat_id = ? LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+
+        if row and str(row["title"] or "").strip():
+            return str(row["title"]).strip()
+
+        if chat_id == HISTORY_SOURCE_CHAT_ID:
+            return "YO REPARO RADIOS"
+
+        return str(chat_id)
 
     def clear_duplicates(self) -> tuple[int, int]:
         unique_count, hash_count = self.duplicate_counts()
@@ -4154,6 +4234,95 @@ async def send_long_text(chat_id: int, text: str, context: ContextTypes.DEFAULT_
         await context.bot.send_message(chat_id=chat_id, text=chunk)
 
 
+def admin_activity_summary(
+    entries: list[dict[str, object]],
+) -> dict[str, int]:
+    buckets = {
+        "ACTIVO": 0,
+        "POCO ACTIVO": 0,
+        "INACTIVO": 0,
+        "MUY INACTIVO": 0,
+    }
+
+    for entry in entries:
+        last_seen = (
+            entry.get("last_seen")
+            if isinstance(entry.get("last_seen"), datetime)
+            else None
+        )
+        _, state = activity_status(last_seen)
+        buckets[state] += 1
+
+    return buckets
+
+
+def admin_group_message_link(chat_id: int, message_id: int) -> str | None:
+    """Enlace directo usando solo chat_id; útil desde el panel privado."""
+    chat_id_text = str(int(chat_id))
+    if chat_id_text.startswith("-100"):
+        internal_id = chat_id_text[4:]
+        if internal_id:
+            return f"https://t.me/c/{internal_id}/{int(message_id)}"
+    return None
+
+
+def admin_archive_search_text(
+    query_text: str,
+    rows: list[sqlite3.Row],
+) -> str:
+    terms = extract_archive_terms(query_text)
+    normalized_query = " ".join(terms) if terms else query_text.strip()
+
+    if not rows:
+        return (
+            "🌵 Pecos no encontró un archivo que cumpla suficientemente con "
+            f"«{normalized_query}» en {db.known_group_title(HISTORY_SOURCE_CHAT_ID)}.\n\n"
+            "Prefiero no mostrar coincidencias parciales que puedan pertenecer "
+            "a otro modelo, marca o plataforma."
+        )
+
+    lines = [
+        f"📦 Búsqueda administrativa: «{normalized_query}»",
+        f"Grupo fuente: {db.known_group_title(HISTORY_SOURCE_CHAT_ID)}",
+        "",
+    ]
+
+    for index, row in enumerate(rows[:8], start=1):
+        file_name = str(row["file_name"] or "archivo")
+        file_size = human_file_size(int(row["file_size"] or 0))
+        sender = str(row["sender_name"] or "usuario desconocido")
+        link = admin_group_message_link(
+            HISTORY_SOURCE_CHAT_ID,
+            int(row["message_id"]),
+        )
+
+        lines.append(
+            f"{index}. 📦 {file_name} · {file_size} · {sender}"
+        )
+        if link:
+            lines.append(f"   🔗 {link}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def inactive_admin_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("30 días", callback_data="admininactive:30"),
+                InlineKeyboardButton("60 días", callback_data="admininactive:60"),
+            ],
+            [
+                InlineKeyboardButton("90 días", callback_data="admininactive:90"),
+                InlineKeyboardButton("180 días", callback_data="admininactive:180"),
+            ],
+            [InlineKeyboardButton("365 días", callback_data="admininactive:365")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -4162,6 +4331,18 @@ def main_menu() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("📊 Ver estado", callback_data="menu:status"),
                 InlineKeyboardButton("📜 Historial", callback_data="menu:history"),
+            ],
+            [
+                InlineKeyboardButton("👥 Actividad miembros", callback_data="admin:activity"),
+                InlineKeyboardButton("💤 Inactivos", callback_data="admin:inactive"),
+            ],
+            [
+                InlineKeyboardButton("📦 Buscar archivos", callback_data="admin:search"),
+                InlineKeyboardButton("🧠 Memoria Pecos", callback_data="admin:memory"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Información Pecos", callback_data="admin:info"),
+                InlineKeyboardButton("❓ Ayuda Admin", callback_data="admin:help"),
             ],
             [
                 InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes"),
@@ -4731,6 +4912,42 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     text = message.text.strip()
 
+    if action == "admin:search_files":
+        terms = extract_archive_terms(text)
+
+        if not terms:
+            await message.reply_text(
+                "📦 No encontré términos válidos.\n\n"
+                "Ejemplos:\n"
+                "KPG-D6\n"
+                "Kenwood DMR\n"
+                "CPS EM200\n\n"
+                "Intenta nuevamente o usa /cancel."
+            )
+            return True
+
+        if archive_query_needs_target(text, terms):
+            await message.reply_text(
+                "👀 Necesito un modelo, familia, plataforma o identificador más concreto.\n\n"
+                "Ejemplos: EM200, DEP450, MOTOTRBO, APX, KPG-D6.\n\n"
+                "Intenta nuevamente o usa /cancel."
+            )
+            return True
+
+        rows = search_archive_rows(
+            HISTORY_SOURCE_CHAT_ID,
+            " ".join(terms),
+            limit=8,
+        )
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+
+        await message.reply_text(
+            admin_archive_search_text(text, rows),
+            reply_markup=main_menu(),
+        )
+        return True
+
     if action == "words:add":
         terms = split_input_lines(text)
         if not terms:
@@ -4929,6 +5146,205 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "menu:main":
         PENDING_ADMIN_ACTION.pop(user_id, None)
         await safe_edit(query, "⚙️ Configuración de Pecos", main_menu())
+        return
+
+    if data == "admin:activity":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+
+        entries = build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
+        if not entries:
+            await query.message.reply_text(
+                "👥 Pecos todavía no tiene actividad observada para el grupo fuente."
+            )
+            return
+
+        buckets = admin_activity_summary(entries)
+        group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
+
+        report = build_activity_text_report(group_title, entries)
+        payload = io.BytesIO(report.encode("utf-8-sig"))
+        payload.name = (
+            "pecos_actividad_"
+            + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+            + ".txt"
+        )
+
+        caption = (
+            f"👥 Actividad observada — {group_title}\n\n"
+            f"Usuarios con registro: {len(entries)}\n"
+            f"🟢 Activos (0–30 d): {buckets['ACTIVO']}\n"
+            f"🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n"
+            f"🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n"
+            f"🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n"
+            "📄 Adjunto va el detalle completo.\n"
+            "ℹ️ Es actividad observada en el grupo, no la última conexión a Telegram."
+        )
+
+        await context.bot.send_document(
+            chat_id=chat.id,
+            document=payload,
+            caption=caption,
+        )
+        return
+
+    if data == "admin:inactive":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await safe_edit(
+            query,
+            "💤 Usuarios sin actividad observada\n\n"
+            "Elige el período que quieres revisar.",
+            inactive_admin_menu(),
+        )
+        return
+
+    if data.startswith("admininactive:"):
+        try:
+            days = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await query.message.reply_text("No pude interpretar el período.")
+            return
+
+        if days not in {30, 60, 90, 180, 365}:
+            await query.message.reply_text("Período no permitido.")
+            return
+
+        entries = build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
+        inactive = [
+            entry
+            for entry in entries
+            if activity_age_days(
+                entry.get("last_seen")
+                if isinstance(entry.get("last_seen"), datetime)
+                else None
+            ) >= days
+        ]
+
+        group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
+
+        if not inactive:
+            await query.message.reply_text(
+                f"💤 No encontré usuarios con {days} días o más "
+                "sin actividad observada."
+            )
+            return
+
+        report = build_activity_text_report(
+            group_title,
+            entries,
+            inactive_days=days,
+        )
+        payload = io.BytesIO(report.encode("utf-8-sig"))
+        payload.name = (
+            f"pecos_inactivos_{days}d_"
+            + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+            + ".txt"
+        )
+
+        await context.bot.send_document(
+            chat_id=chat.id,
+            document=payload,
+            caption=(
+                f"💤 {group_title}\n"
+                f"{len(inactive)} usuario(s) con {days} días o más "
+                "sin actividad observada.\n\n"
+                "📄 Adjunto va el detalle.\n"
+                "ℹ️ No equivale a la última conexión a Telegram."
+            ),
+        )
+        return
+
+    if data == "admin:search":
+        PENDING_ADMIN_ACTION[user_id] = "admin:search_files"
+        await query.message.reply_text(
+            "📦 ¿Qué archivo, programa, CPS, firmware, modelo o identificador "
+            "quieres buscar en el archivo de YO REPARO RADIOS?\n\n"
+            "Ejemplos:\n"
+            "KPG-D6\n"
+            "Kenwood DMR\n"
+            "CPS EM200\n\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "admin:memory":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        stats = db.admin_memory_stats(HISTORY_SOURCE_CHAT_ID)
+        statuses = stats["statuses"]
+        group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
+
+        memory_text = (
+            f"🧠 Memoria de Pecos — {group_title}\n\n"
+            f"Mensajes almacenados: {stats['messages']:,}\n"
+            f"Clasificaciones: {stats['classifications']:,}\n"
+            f"Pares consulta/respuesta: {stats['pairs']:,}\n"
+            f"Autores con actividad registrada: {stats['users']:,}\n"
+            f"Soluciones confirmadas: {statuses.get('CONFIRMED', 0):,}\n"
+            f"Respuestas rechazadas: {statuses.get('REJECTED', 0):,}\n"
+            f"Pendientes/probables: {statuses.get('PROBABLE', 0):,}\n"
+            f"Fingerprints del grupo: {stats['fingerprints']:,}\n\n"
+            f"Grupo fuente: {HISTORY_SOURCE_CHAT_ID}\n"
+            "Estado: ✅ Memoria histórica activa"
+        )
+        await query.message.reply_text(memory_text)
+        return
+
+    if data == "admin:info":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        unique_count, hash_count = db.duplicate_counts()
+        stats = db.admin_memory_stats(HISTORY_SOURCE_CHAT_ID)
+
+        try:
+            db_size_mb = DB_PATH.stat().st_size / (1024 * 1024)
+            db_size_text = f"{db_size_mb:.1f} MB"
+        except OSError:
+            db_size_text = "no disponible"
+
+        info_text = (
+            f"ℹ️ {APP_NAME}\n\n"
+            f"Versión: {VERSION}\n"
+            f"Estado del proceso: 🟢 Online\n"
+            f"Zona horaria: {TIMEZONE_NAME}\n"
+            f"Bot API: {'LOCAL' if LOCAL_BOT_API else 'PÚBLICA'}\n"
+            f"Base de datos: {DB_PATH}\n"
+            f"Tamaño DB: {db_size_text}\n"
+            f"Grupos autorizados: {len(ALLOWED_GROUP_IDS)}\n"
+            f"Administradores Pecos: {len(ADMIN_USER_IDS)}\n"
+            f"Memoria histórica: ✅ Activa\n"
+            f"Mensajes históricos: {stats['messages']:,}\n"
+            f"Autores observados: {stats['users']:,}\n"
+            f"FileUniqueId registrados: {unique_count:,}\n"
+            f"SHA-256 / fingerprints registrados: {hash_count:,}\n"
+            f"Duplicados: {'✅ Activo' if db.is_true('duplicates_enabled') else '❌ Desactivado'}\n"
+            f"Silencio: {'✅ Activo' if db.is_true('silence_enabled') else '❌ Desactivado'}\n"
+            f"Mensaje diario: {'✅ Activo' if db.is_true('daily_enabled') else '❌ Desactivado'}"
+        )
+        await query.message.reply_text(info_text)
+        return
+
+    if data == "admin:help":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        help_text = (
+            "❓ Ayuda para administradores de Pecos\n\n"
+            "/config — Abrir este panel\n"
+            "/buscar KPG-D6 — Buscar archivos\n"
+            "/historial EM200 — Buscar conversaciones históricas\n"
+            "/actividad — Resumen de actividad observada\n"
+            "/actividad @usuario — Ficha de un usuario\n"
+            "/inactivos 90 — Usuarios sin actividad durante 90 días\n"
+            "/recordar texto — Guardar un recuerdo del grupo\n"
+            "/recuerdos — Ver recuerdos\n"
+            "/olvidar ID — Borrar un recuerdo\n"
+            "/encuesta — Crear encuesta\n"
+            "/consejo — Consejo de Pecos\n"
+            "/frase — Frase de Pecos\n"
+            "/excusa — Excusa de Pecos\n"
+            "/pronostico — Pronóstico de Pecos\n"
+            "/cancel — Cancelar una operación del panel\n"
+            "/id — Ver Telegram User ID\n\n"
+            "🔒 Estas funciones manuales están reservadas a los "
+            "administradores configurados de Pecos."
+        )
+        await query.message.reply_text(help_text)
         return
 
     if data == "menu:words":
