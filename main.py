@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.19-multi-model-suffix"
+VERSION = "2.8.20-humor-control"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -711,6 +711,67 @@ XERAX_FUN_MESSAGES = [
     "🌵 XeraX dijo ‘solo voy a automatizar la programación de radios’. Pecos ya está preparando un refugio.",
 ]
 
+
+# Bromas AUTOMÁTICAS para la propia aparición de @XeraX.
+# Son independientes de XERAX_FUN_MESSAGES: las bromas antiguas siguen
+# activándose cuando XeraX es nombrado explícitamente.
+XERAX_AUTO_MESSAGES = [
+    "🤖 XeraX apareció. Pecos acaba de revisar CPU, RAM y la factura del cloud. Por protocolo, nada personal.",
+    "🌵 XeraX presente. Pecos ya escondió las Raspberry Pi y dejó una calculadora de señuelo.",
+    "📡 Señal de XeraX detectada. Los servidores del pueblo aseguran que todo está bien. Demasiado bien.",
+    "🖥️ XeraX escribió. Si algún ventilador empezó a girar más rápido, Pecos declara que es pura coincidencia.",
+    "⛏️ XeraX en frecuencia. Pecos revisó la GPU por costumbre y volvió lentamente a su escritorio.",
+    "🤠 XeraX apareció. Tranquilos: Pecos contó los bots antes de saludar. Después contamos de nuevo.",
+    "🧠 XeraX está en línea. Su IA dice que solo vino a conversar. Pecos mantiene una ceja levantada.",
+    "🔌 XeraX hizo una intervención. Por tradición del pueblo, nadie conecta un VPS nuevo durante los próximos cinco minutos.",
+    "🪙 XeraX presente. La blockchain no reporta novedades, pero Pecos igual anotó la hora.",
+    "😂 Llegó XeraX. Pecos promete no acusarlo de nada mientras la CPU del vecino permanezca bajo el 90%.",
+    "📻 XeraX habló. Los radios siguen funcionando y Pecos considera eso una excelente señal.",
+    "🚨 Código XeraX activado. No es emergencia; es solamente el sheriff haciendo inventario de procesadores.",
+]
+
+DAILY_FUN_GREETINGS = [
+    "🤠 Buenos días, criaturas del espectro radioeléctrico. Pecos presente. Que hoy el problema sea el fusible y no el técnico.",
+    "☕ Buenos días. Pecos ya está despierto. No puedo decir lo mismo de algunos diagnósticos que leo por aquí.",
+    "📡 Pecos reportándose. Café listo, multímetro listo y paciencia… en niveles preocupantemente bajos.",
+    "🌵 Buen día, colegas. Antes de culpar al firmware, revisen el cable. Pecos los está observando.",
+    "😎 Buenos días. Que hoy todos los radios programen a la primera. Sí, también Pecos puede soñar.",
+    "🔧 Saludos, habitantes del taller. Hoy intentaremos reparar equipos sin crear fallas nuevas. Intentaremos.",
+    "📻 Pecos presente. Si hoy alguien pregunta «¿qué CPS usa?» sin decir el modelo, respiraré profundo tres veces.",
+    "🤠 Muy buenos días. Que ningún radio llegue hoy con la clásica descripción técnica: «ayer funcionaba».",
+    "☕ Buen día. Pecos ya tomó asistencia. Los que llegaron tarde deberán explicar por qué el equipo quedó en modo boot.",
+    "📡 Buenos días. Comienza otra jornada de radios, cables, firmware y decisiones cuestionables. Pecos está listo.",
+    "🌵 Pecos abre el pueblo por hoy. Revisen voltajes, versiones y conectores antes de invocar fuerzas sobrenaturales.",
+    "🤠 Buenos días, partners. Que la señal sea fuerte, el SWR bajo y los respaldos existan antes de tocar el firmware.",
+]
+
+PECOS_DUEL_MESSAGES = [
+    "🤠 ¿Así que insultando a Pecos? Esto ya merece un duelo a muerte… de argumentos. Y te aviso: yo nunca fallo.",
+    "🌵 Cuidado con ese vocabulario, {usuario}. Tres palabras más y te desafío a duelo a muerte técnico: esquema eléctrico al amanecer. Yo nunca fallo.",
+    "📡 ¿Me estás ofendiendo, {usuario}? Perfecto. Elige arma: multímetro, CPS o sarcasmo. Yo nunca fallo.",
+    "🤠 Eso sonó personal, {usuario}. Pecos solicita duelo a muerte… de conocimientos. El que confunda RX con TX paga el café.",
+    "🔧 Insulto registrado. Te espero para un duelo a muerte de diagnóstico: sin balas, con diagramas. Pecos nunca falla.",
+    "😂 Valiente detrás del teclado, {usuario}. Pecos acepta el desafío: duelo a muerte de firmware. Pierde el primero que deje un radio en boot.",
+    "🌵 Has herido mis sentimientos digitales, {usuario}. La salida honorable es un duelo a muerte de sarcasmo. Mala noticia: yo nunca fallo.",
+    "📻 Ofender a Pecos tiene consecuencias: duelo a muerte de conocimientos. Primera prueba: explicar la falla sin decir «ayer funcionaba».",
+    "🤠 Pecos ha sido provocado. Procedo a sacar mi arma más peligrosa: el manual de servicio. Yo nunca fallo.",
+    "📡 Acepto tus disculpas por adelantado, {usuario}. Si no, duelo a muerte de argumentos. Y ya sabes: Pecos nunca falla.",
+]
+
+PECOS_INSULT_RE = re.compile(
+    r"\b("
+    r"idiota|estupido|estupida|imbecil|inutil|tonto|tonta|tarado|tarada|"
+    r"gil|pelotudo|pelotuda|pendejo|pendeja|huevon|huevona|weon|weona|wn|"
+    r"culiao|culiado|culia[oó]|mierda|basura|callate|cállate"
+    r")\b",
+    re.IGNORECASE,
+)
+
+BAND_CONVERSION_PANEL_MESSAGES = [
+    "🤠 Pasar un UHF a VHF es casi como pedirle a un árbol que florezca billetes… bonito sería, pero no funciona así, partner. 😂",
+    "🌵 Convertir VHF en UHF por programación sería precioso. Pecos también quisiera convertir cactus en antenas.",
+]
+
 SILENCE_MESSAGES = [
     "🤠 ¿Qué pasó por aquí? Pecos escucha hasta los grillos. Ya van {horas} horas de silencio.",
     "🌵 Tanto silencio que Pecos ya empezó a conversar con un cactus. Marcador actual: {horas} horas.",
@@ -1106,6 +1167,7 @@ class Database:
             "daily_enabled": "0",
             "daily_time": "09:00",
             "daily_message": "Buen día. Recuerda mantener una convivencia respetuosa en el grupo.",
+            "daily_fun_enabled": "0",
             # Desactivado por defecto en producción para evitar sorpresas.
             "duplicates_enabled": "0",
             "last_daily_sent_date": "",
@@ -5469,7 +5531,7 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("❓ Ayuda Admin", callback_data="admin:help"),
             ],
             [
-                InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes"),
+                InlineKeyboardButton("🎭 Bromas y humor", callback_data="menu:humor"),
                 InlineKeyboardButton("🌵 Silencio", callback_data="menu:silence"),
             ],
             [InlineKeyboardButton("📦 Duplicados", callback_data="menu:dups")],
@@ -5509,40 +5571,83 @@ def build_daily_panel_text() -> str:
     status = "ACTIVO" if db.is_true("daily_enabled") else "DESACTIVADO"
     daily_time = db.get_setting("daily_time", "09:00")
     daily_message = db.get_setting("daily_message", "").strip()
+    fun_enabled = db.is_true("daily_fun_enabled")
 
     if not daily_message:
         daily_message = "(sin texto configurado)"
 
-    # Telegram limita los mensajes a 4096 caracteres. El mensaje diario puede
-    # tener hasta 4000, así que para el panel mostramos una vista segura.
-    max_preview = 3200
+    max_preview = 2900
     if len(daily_message) > max_preview:
         daily_message = (
             daily_message[:max_preview].rstrip()
             + "\n… (texto recortado en el panel)"
         )
 
+    mode = (
+        "🎲 Saludo en broma de Pecos"
+        if fun_enabled
+        else "📝 Texto configurado"
+    )
+
     return (
         "🕘 Mensaje diario\n\n"
         f"Estado: {status}\n"
         f"Hora: {daily_time}\n"
-        f"Zona: {TIMEZONE_NAME}\n\n"
-        "📝 Mensaje programado:\n"
-        f"{daily_message}"
+        f"Zona: {TIMEZONE_NAME}\n"
+        f"Modo: {mode}\n\n"
+        "📝 Texto configurado:\n"
+        f"{daily_message}\n\n"
+        + (
+            f"🎲 Humor diario activo: Pecos elegirá una de "
+            f"{len(DAILY_FUN_GREETINGS)} bromas al azar a la hora indicada."
+            if fun_enabled
+            else "🎲 Humor diario apagado: se enviará exactamente el texto configurado."
+        )
     )
 
 
 def daily_menu() -> InlineKeyboardMarkup:
     enabled = db.is_true("daily_enabled")
+    fun_enabled = db.is_true("daily_fun_enabled")
     toggle_text = "🔴 Desactivar" if enabled else "🟢 Activar"
+    fun_text = "🎲 Humor diario: ON" if fun_enabled else "🎲 Humor diario: OFF"
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(toggle_text, callback_data="daily:toggle")],
+            [InlineKeyboardButton(fun_text, callback_data="daily:fun")],
             [
                 InlineKeyboardButton("🕒 Cambiar hora", callback_data="daily:time"),
                 InlineKeyboardButton("✏️ Cambiar texto", callback_data="daily:text"),
             ],
             [InlineKeyboardButton("👁️ Ver configuración", callback_data="daily:view")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
+def humor_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🤖 XeraX", callback_data="humor:xerax"),
+                InlineKeyboardButton("🎬 Melerix", callback_data="humor:melerix"),
+            ],
+            [
+                InlineKeyboardButton("🤠 Consejo", callback_data="humor:advice"),
+                InlineKeyboardButton("💬 Frase", callback_data="humor:phrase"),
+            ],
+            [
+                InlineKeyboardButton("🌵 Excusa", callback_data="humor:excuse"),
+                InlineKeyboardButton("🔮 Pronóstico", callback_data="humor:forecast"),
+            ],
+            [
+                InlineKeyboardButton("⚔️ Duelo Pecos", callback_data="humor:duel"),
+                InlineKeyboardButton("📻 VHF ↔ UHF", callback_data="humor:band"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes"),
+                InlineKeyboardButton("🕘 Saludo diario", callback_data="menu:daily"),
+            ],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
         ]
     )
@@ -5556,7 +5661,7 @@ def jokes_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("➕ Agregar", callback_data="jokes:add"),
             ],
             [InlineKeyboardButton("➖ Eliminar por ID", callback_data="jokes:remove")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+            [InlineKeyboardButton("⬅️ Volver a humor", callback_data="menu:humor")],
         ]
     )
 
@@ -6498,6 +6603,61 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(help_text)
         return
 
+    if data == "menu:humor":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await safe_edit(
+            query,
+            "🎭 Bromas y humor de Pecos\n\n"
+            "Accesos directos a los distintos repertorios y controles de humor.",
+            humor_menu(),
+        )
+        return
+
+    if data == "humor:xerax":
+        await query.message.reply_text(
+            choose_random("panel_xerax", XERAX_FUN_MESSAGES, query.from_user.first_name or "admin"),
+            reply_markup=humor_menu(),
+        )
+        return
+
+    if data == "humor:melerix":
+        await query.message.reply_text(
+            choose_random("panel_melerix", MELERIX_FUN_MESSAGES, query.from_user.first_name or "admin"),
+            reply_markup=humor_menu(),
+        )
+        return
+
+    if data == "humor:advice":
+        await query.message.reply_text(random.choice(ADVICE_MESSAGES), reply_markup=humor_menu())
+        return
+
+    if data == "humor:phrase":
+        await query.message.reply_text(random.choice(PHRASE_MESSAGES), reply_markup=humor_menu())
+        return
+
+    if data == "humor:excuse":
+        await query.message.reply_text(random.choice(EXCUSE_MESSAGES), reply_markup=humor_menu())
+        return
+
+    if data == "humor:forecast":
+        await query.message.reply_text(random.choice(FORECAST_MESSAGES), reply_markup=humor_menu())
+        return
+
+    if data == "humor:duel":
+        template = random.choice(PECOS_DUEL_MESSAGES)
+        await query.message.reply_text(
+            template.format(usuario=query.from_user.first_name or "partner"),
+            reply_markup=humor_menu(),
+        )
+        return
+
+    if data == "humor:band":
+        await query.message.reply_text(
+            random.choice(BAND_CONVERSION_PANEL_MESSAGES),
+            reply_markup=humor_menu(),
+        )
+        return
+
     if data == "menu:words":
         PENDING_ADMIN_ACTION.pop(user_id, None)
         await safe_edit(
@@ -6677,6 +6837,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    if data == "daily:fun":
+        enabled = not db.is_true("daily_fun_enabled")
+        db.set_setting("daily_fun_enabled", "1" if enabled else "0")
+        db.add_history(
+            f"ADMIN: humor del mensaje diario {'activado' if enabled else 'desactivado'}."
+        )
+        await safe_edit(
+            query,
+            build_daily_panel_text(),
+            daily_menu(),
+        )
+        return
+
     if data == "daily:time":
         PENDING_ADMIN_ACTION[user_id] = "daily:time"
         await query.message.reply_text(
@@ -6708,6 +6881,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Palabras/frases restringidas: {len(db.list_terms())}\n"
             f"Grupos conocidos: {len(groups)}\n"
             f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
+            f"Humor diario: {'Activo' if db.is_true('daily_fun_enabled') else 'Desactivado'}\n"
             f"Hora diaria: {db.get_setting('daily_time')} ({TIMEZONE_NAME})\n"
             f"Bot API: {'LOCAL integrada (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
             f"Archivos de hash: temporal ({TELEGRAM_FILES_DIR})\n"
@@ -7695,6 +7869,120 @@ async def handle_band_conversion_joke(message: Message) -> bool:
     return True
 
 
+
+def xerax_day_period(now: datetime) -> str:
+    """Tres tramos máximos por fecha local: mañana, tarde y noche."""
+    hour = now.hour
+    if 6 <= hour < 12:
+        return "manana"
+    if 12 <= hour < 19:
+        return "tarde"
+    return "noche"
+
+
+async def handle_xerax_auto_presence(message: Message) -> bool:
+    """
+    Broma automática a XeraX:
+    - solo cuando @XeraX interviene personalmente;
+    - máximo una por mañana, una por tarde y una por noche;
+    - persistente en SQLite;
+    - NO consume ni reemplaza las bromas antiguas por mención.
+    """
+    user = message.from_user
+    if not user or user.is_bot or not user.username:
+        return False
+
+    if user.username.casefold() != XERAX_USERNAME:
+        return False
+
+    now = datetime.now(BOT_TZ)
+    period = xerax_day_period(now)
+    today = now.strftime("%Y-%m-%d")
+    event_key = f"xerax_auto_presence:{period}"
+
+    first_in_period = db.claim_daily_user_event(
+        event_key,
+        int(user.id),
+        user.username,
+        today,
+    )
+    if not first_in_period:
+        return False
+
+    await message.reply_text(
+        choose_random(
+            f"xerax_auto_{period}",
+            XERAX_AUTO_MESSAGES,
+            display_name(message),
+        )
+    )
+    db.add_history(
+        f"BROMA XERAX AUTO {period.upper()} | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
+def message_offends_pecos(message: Message, bot_id: int | None) -> bool:
+    text_value = message.text or message.caption or ""
+    if not text_value or not PECOS_INSULT_RE.search(normalize_intent(text_value)):
+        return False
+
+    if text_mentions_pecos(text_value):
+        return True
+
+    replied = message.reply_to_message
+    replied_user = replied.from_user if replied else None
+    return bool(
+        replied_user
+        and replied_user.is_bot
+        and bot_id is not None
+        and int(replied_user.id) == int(bot_id)
+    )
+
+
+async def handle_pecos_insult_duel(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """
+    Respuesta humorística a una ofensa dirigida claramente a Pecos.
+    Máximo una por usuario por bloque de 2 horas para evitar spam.
+    """
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    if not message_offends_pecos(message, context.bot.id):
+        return False
+
+    now = datetime.now(BOT_TZ)
+    today = now.strftime("%Y-%m-%d")
+    two_hour_slot = now.hour // 2
+    event_key = f"pecos_duel:{two_hour_slot}"
+
+    allowed = db.claim_daily_user_event(
+        event_key,
+        int(user.id),
+        user.username or str(user.id),
+        today,
+    )
+    if not allowed:
+        return False
+
+    template = choose_random(
+        "pecos_duel",
+        PECOS_DUEL_MESSAGES,
+        display_name(message),
+    )
+    await message.reply_text(
+        template.format(usuario=display_name(message))
+    )
+    db.add_history(
+        f"DUELO HUMOR PECOS | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
 async def handle_melerix_fun(message: Message) -> bool:
     """
     Broma especial para la palabra clave Melerix.
@@ -7764,6 +8052,14 @@ async def handle_xerax_fun(message: Message) -> bool:
     - Usa una clave separada de Melerix, por lo que ambos límites son independientes.
     """
     if not message.from_user or message.from_user.is_bot:
+        return False
+
+    # Las intervenciones del propio XeraX usan el nuevo límite por
+    # mañana/tarde/noche. Este repertorio antiguo queda para menciones.
+    if (
+        message.from_user.username
+        and message.from_user.username.casefold() == XERAX_USERNAME
+    ):
         return False
 
     if not message_references_xerax(message):
@@ -8470,10 +8766,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         helpful_score = remember_helpful_contribution(message)
         await maybe_send_reputation_notice(message, context, helpful_score)
 
-    # Moderación tiene prioridad sobre saludos/respuestas.
+    # Si la ofensa está dirigida claramente a Pecos, responde con humor.
+    # Luego la moderación conserva su prioridad y puede actuar sobre el mensaje.
+    duel_handled = False
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        duel_handled = await handle_pecos_insult_duel(message, context)
+
+    # Moderación tiene prioridad sobre el resto de respuestas.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await moderate_if_needed(message, context):
             return
+
+    if duel_handled:
+        return
 
     # Usuario recién ingresado que pregunta antes de revisar reglas/archivos.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -8499,8 +8807,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_melerix_fun(message):
             return
 
-    # Broma especial XeraX: mención textual/@username o respuesta directa.
-    # Una sola respuesta persistente por usuario; OWNER sin límite.
+    # Broma automática por la propia presencia de XeraX:
+    # máximo una por mañana, tarde y noche.
+    if (
+        not is_edited
+        and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    ):
+        if await handle_xerax_auto_presence(message):
+            return
+
+    # Broma antigua XeraX: se conserva para menciones explícitas de otros
+    # usuarios. OWNER mantiene su activación sin límite.
     if (
         not is_edited
         and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
@@ -8613,7 +8930,14 @@ async def daily_loop(application: Application) -> None:
                 last_sent = db.get_setting("last_daily_sent_date", "")
 
                 if now.strftime("%H:%M") == daily_time and last_sent != today:
-                    text = db.get_setting("daily_message")
+                    if db.is_true("daily_fun_enabled"):
+                        text = choose_random(
+                            "daily_fun_greeting",
+                            DAILY_FUN_GREETINGS,
+                            today,
+                        )
+                    else:
+                        text = db.get_setting("daily_message")
                     groups = [
                         row for row in db.list_groups()
                         if int(row["chat_id"]) in ALLOWED_GROUP_IDS
