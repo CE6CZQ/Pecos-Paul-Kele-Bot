@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.17-mototrbo-catalog-v6"
+VERSION = "2.8.18-daily-message-visible"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -5489,6 +5489,33 @@ def words_menu() -> InlineKeyboardMarkup:
     )
 
 
+def build_daily_panel_text() -> str:
+    status = "ACTIVO" if db.is_true("daily_enabled") else "DESACTIVADO"
+    daily_time = db.get_setting("daily_time", "09:00")
+    daily_message = db.get_setting("daily_message", "").strip()
+
+    if not daily_message:
+        daily_message = "(sin texto configurado)"
+
+    # Telegram limita los mensajes a 4096 caracteres. El mensaje diario puede
+    # tener hasta 4000, así que para el panel mostramos una vista segura.
+    max_preview = 3200
+    if len(daily_message) > max_preview:
+        daily_message = (
+            daily_message[:max_preview].rstrip()
+            + "\n… (texto recortado en el panel)"
+        )
+
+    return (
+        "🕘 Mensaje diario\n\n"
+        f"Estado: {status}\n"
+        f"Hora: {daily_time}\n"
+        f"Zona: {TIMEZONE_NAME}\n\n"
+        "📝 Mensaje programado:\n"
+        f"{daily_message}"
+    )
+
+
 def daily_menu() -> InlineKeyboardMarkup:
     enabled = db.is_true("daily_enabled")
     toggle_text = "🔴 Desactivar" if enabled else "🟢 Activar"
@@ -6091,7 +6118,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         PENDING_ADMIN_ACTION.pop(user.id, None)
         db.add_history(f"ADMIN: cambió la hora del mensaje diario a {text}.")
         await message.reply_text(
-            f"✅ Hora diaria guardada: {text}",
+            f"✅ Hora diaria guardada: {text}\n\n{build_daily_panel_text()}",
             reply_markup=daily_menu(),
         )
         return True
@@ -6195,7 +6222,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         PENDING_ADMIN_ACTION.pop(user.id, None)
         db.add_history("ADMIN: cambió el texto del mensaje diario.")
         await message.reply_text(
-            "✅ Mensaje diario actualizado.",
+            f"✅ Mensaje diario actualizado.\n\n{build_daily_panel_text()}",
             reply_markup=daily_menu(),
         )
         return True
@@ -6616,10 +6643,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data == "menu:daily":
         PENDING_ADMIN_ACTION.pop(user_id, None)
-        status = "ACTIVO" if db.is_true("daily_enabled") else "DESACTIVADO"
         await safe_edit(
             query,
-            f"🕘 Mensaje diario\n\nEstado: {status}\nHora: {db.get_setting('daily_time')}\nZona: {TIMEZONE_NAME}",
+            build_daily_panel_text(),
             daily_menu(),
         )
         return
@@ -6630,8 +6656,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         db.add_history(f"ADMIN: mensaje diario {'activado' if enabled else 'desactivado'}.")
         await safe_edit(
             query,
-            f"🕘 Mensaje diario\n\nEstado: {'ACTIVO' if enabled else 'DESACTIVADO'}\n"
-            f"Hora: {db.get_setting('daily_time')}\nZona: {TIMEZONE_NAME}",
+            build_daily_panel_text(),
             daily_menu(),
         )
         return
@@ -6651,13 +6676,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "daily:view":
-        enabled = "Sí" if db.is_true("daily_enabled") else "No"
         await query.message.reply_text(
-            "👁️ Configuración del mensaje diario\n\n"
-            f"Activo: {enabled}\n"
-            f"Hora: {db.get_setting('daily_time')}\n"
-            f"Zona horaria: {TIMEZONE_NAME}\n\n"
-            f"Mensaje:\n{db.get_setting('daily_message')}"
+            build_daily_panel_text(),
+            reply_markup=daily_menu(),
         )
         return
 
