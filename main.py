@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.16-firmware-equipment-class"
+VERSION = "2.8.17-mototrbo-catalog-v6"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -283,7 +283,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
-TECHNICAL_CATALOG_PARSER_VERSION = "technical-v4.2-equipment-class"
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.0-mototrbo-domain"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -3501,41 +3501,102 @@ def technical_catalog_detect_brands(file_name: str) -> list[str]:
 
 def technical_catalog_detect_resources(file_name: str) -> list[str]:
     _raw, spaced, compact = technical_normalized_parts(file_name)
+    found: list[str] = []
 
-    # Los paquetes MOTOTRBO de firmware históricos suelen no decir
-    # literalmente "firmware". Se reconocen por el esquema de versión/release
-    # usado en el grupo, por ejemplo:
-    # MOTOTRBO_R7_R0226011000_262106_Portable_LA.zip
-    # MOTOTRBO_2.0_R20260103_266102_Repeater SLR.zip
-    mototrbo_release_firmware = (
-        "MOTOTRBO" in compact
-        and re.search(r"\bR\d{8,12}\b", spaced) is not None
-        and re.search(
-            r"\b(?:PORTABLE|MOBILE|REPEATER|DGM|DEM|SLR|R7|LIGHT)\b",
-            spaced,
-        ) is not None
+    def add(value: str) -> None:
+        if value and value not in found:
+            found.append(value)
+
+    mototrbo = "MOTOTRBO" in compact
+    mototrbo_cps_downgrade = mototrbo and "CPS" in compact and "DOWNGRADE" in compact
+    mototrbo_service_manual = mototrbo and (
+        "MANUALESDESERVICIO" in compact
+        or "SERVICEMANUAL" in compact
+    )
+    mototrbo_userdata = mototrbo and "USERDATA" in compact
+    mototrbo_tuner = mototrbo and "TUNER" in compact
+    mototrbo_depottool = mototrbo and "DEPOTTOOL" in compact
+    mototrbo_audio_patch = mototrbo and "AUDIOFIX" in compact and "PARCHE" in compact
+    mototrbo_review_gobflash = mototrbo and "GOBFLASH" in compact
+
+    mototrbo_cps_patch = mototrbo and "CPS" in compact and any(
+        marker in compact
+        for marker in (
+            "PATCH", "CRACK", "WIDEBAND25KHZ", "ANALOGSUPPORT"
+        )
+    )
+    mototrbo_cps_software = (
+        mototrbo
+        and "CPS" in compact
+        and not mototrbo_cps_downgrade
+        and not mototrbo_cps_patch
     )
 
-    # Este archivo es una herramienta/paquete de downgrade, no un firmware
-    # normal, aunque incluya "FW" en el nombre.
-    mototrbo_cps_downgrade = (
-        "MOTOTRBOCPS" in compact
-        and "DOWNGRADE" in compact
+    # Firmware MOTOTRBO histórico. Muchos paquetes no dicen "FIRMWARE";
+    # se reconocen por el release R... y por la nomenclatura usada en el grupo.
+    release_pattern = re.search(r"\bR\d+(?:\s+\d+){0,4}\b", spaced) is not None
+    mototrbo_firmware = (
+        mototrbo
+        and not mototrbo_cps_downgrade
+        and not mototrbo_cps_patch
+        and not mototrbo_cps_software
+        and not mototrbo_service_manual
+        and not mototrbo_userdata
+        and not mototrbo_tuner
+        and not mototrbo_depottool
+        and not mototrbo_audio_patch
+        and not mototrbo_review_gobflash
+        and (
+            re.search(r"\bFIRMWARE\b", spaced) is not None
+            or re.search(r"\bFW\b", spaced) is not None
+            or release_pattern
+        )
     )
 
-    tests = {
+    # Etiquetas MOTOTRBO de dominio confirmadas por el usuario.
+    if mototrbo_service_manual:
+        add("MANUAL")
+        add("SERVICE_MANUAL")
+    if mototrbo_userdata:
+        add("USERDATA")
+    if mototrbo_tuner:
+        add("TUNER")
+    if mototrbo_depottool:
+        add("DEPOT")
+        add("DEPOTTOOL")
+    if mototrbo_audio_patch:
+        add("PATCH")
+        add("AUDIO_PATCH")
+    if mototrbo_review_gobflash:
+        add("REVIEW")
+    if mototrbo_cps_downgrade:
+        add("CPS")
+        add("DOWNGRADE")
+    if mototrbo_cps_patch:
+        add("CPS")
+        add("PATCH")
+        add("CPS_PATCH")
+        # CPS2159_Patches fue confirmado como parche/crack de 2.159.384.0.
+        if "CRACK" in compact or "CPS2159PATCH" in compact:
+            add("CRACK")
+    if mototrbo_cps_software:
+        add("CPS")
+        add("CPS_SOFTWARE")
+    if mototrbo_firmware:
+        add("FIRMWARE")
+
+    # Reglas genéricas para el resto del catálogo.
+    generic_tests = {
         "CPS": (
             re.search(r"\bCPS(?:\s*\d+)?\b", spaced)
             or "MULTICPS" in compact
             or "APXCPS" in compact
-            or "MOTOTRBOCPS" in compact
         ),
         "FIRMWARE": (
-            not mototrbo_cps_downgrade
+            not mototrbo
             and (
                 re.search(r"\bFIRMWARE\b", spaced)
                 or re.search(r"\bFW\b", spaced)
-                or mototrbo_release_firmware
             )
         ),
         "UPGRADE": (
@@ -3565,17 +3626,17 @@ def technical_catalog_detect_resources(file_name: str) -> list[str]:
         "TUNER": re.search(r"\bTUNER\b", spaced),
         "DOWNGRADE": re.search(r"\bDOWNGRADE\b", spaced),
     }
-    return [key for key, value in tests.items() if value]
+    for key, value in generic_tests.items():
+        if value:
+            # No devolver FIRMWARE para el downgrade CPS MOTOTRBO.
+            if key == "FIRMWARE" and mototrbo_cps_downgrade:
+                continue
+            add(key)
 
+    return found
 
 def technical_catalog_detect_equipment_classes(file_name: str) -> list[str]:
-    """Clasifica el tipo físico de equipo cuando el nombre lo permite.
-
-    Se prioriza información explícita del nombre (PORTABLE/MOBILE/REPEATER).
-    También se aplican unas pocas inferencias fuertes ya confirmadas en el
-    catálogo: XTS=portátil, DGM/DEM=móvil y SLR=repetidor. Si no hay evidencia
-    suficiente, se deja vacío en vez de inventar una clase.
-    """
+    """Clasifica PORTABLE/MOBILE/REPEATER solo con evidencia fuerte."""
     _raw, spaced, compact = technical_normalized_parts(file_name)
     found: list[str] = []
 
@@ -3590,16 +3651,23 @@ def technical_catalog_detect_equipment_classes(file_name: str) -> list[str]:
     if re.search(r"\bREPEATERS?\b", spaced):
         add("REPEATER")
 
-    # Inferencias fuertes confirmadas por la nomenclatura del grupo.
+    # Inferencias de familias confirmadas.
     if re.search(r"\bXTS\s*\d+", spaced):
         add("PORTABLE")
-    if re.search(r"\b(?:DGM|DEM)\s*\d+", spaced):
-        add("MOBILE")
-    if re.search(r"\bSLR\b", spaced):
-        add("REPEATER")
+
+    if "MOTOTRBO" in compact:
+        if re.search(r"\b(?:R2|R5|R7|R7EX)\b", spaced):
+            add("PORTABLE")
+        if re.search(r"\bDGP\b", spaced):
+            add("PORTABLE")
+        if re.search(r"\b(?:DP\s*1400|SL\s*1600)\b", spaced):
+            add("PORTABLE")
+        if re.search(r"\b(?:DGM|DEM)\s*\d+", spaced) or re.search(r"\bDM1XXX\b", spaced):
+            add("MOBILE")
+        if re.search(r"\bSLR\b", spaced):
+            add("REPEATER")
 
     return found
-
 
 def technical_catalog_detect_technologies(file_name: str) -> list[str]:
     _raw, spaced, compact = technical_normalized_parts(file_name)
@@ -3658,26 +3726,25 @@ TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
 
 
 def technical_catalog_detect_models(file_name: str) -> list[str]:
-    raw, spaced, _compact = technical_normalized_parts(file_name)
+    raw, spaced, compact = technical_normalized_parts(file_name)
     found: list[str] = []
     seen: set[str] = set()
 
+    def add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            found.append(value)
+
     for prefix, pattern in TECHNICAL_MODEL_RULES:
         for match in re.finditer(pattern, spaced):
-            value = f"{prefix}-{match.group(1)}"
-            if value not in seen:
-                seen.add(value)
-                found.append(value)
+            add(f"{prefix}-{match.group(1)}")
 
     # Casos compactos legítimos: KPGD6, KPG166D.
     for match in re.finditer(
         r"(?<![A-Z0-9])KPG([A-Z]?\d+[A-Z]?)(?![A-Z0-9])",
         raw,
     ):
-        value = f"KPG-{match.group(1)}"
-        if value not in seen:
-            seen.add(value)
-            found.append(value)
+        add(f"KPG-{match.group(1)}")
 
     # Ej.: NX-1200, 1202,1300,1302,1700,1800.
     nx_match = re.search(
@@ -3687,72 +3754,102 @@ def technical_catalog_detect_models(file_name: str) -> list[str]:
     if nx_match:
         numbers = [nx_match.group(1)] + re.findall(r"\d{3,4}", nx_match.group(2))
         for number in numbers:
-            value = f"NX-{number}"
-            if value not in seen:
-                seen.add(value)
-                found.append(value)
+            add(f"NX-{number}")
 
-    # Familias Motorola APX N70 / APX NEXT.
-    if re.search(r"\bAPX\s+N70\b", spaced) or "APXN70" in _compact:
-        if "APX-N70" not in seen:
-            seen.add("APX-N70")
-            found.append("APX-N70")
-    if re.search(r"\bAPX\s+NEXT\b", spaced) or "APXNEXT" in _compact:
-        if "APX-NEXT" not in seen:
-            seen.add("APX-NEXT")
-            found.append("APX-NEXT")
+    # Familias Motorola APX.
+    if re.search(r"\bAPX\s+N70\b", spaced) or "APXN70" in compact:
+        add("APX-N70")
+    if re.search(r"\bAPX\s+NEXT\b", spaced) or "APXNEXT" in compact:
+        add("APX-NEXT")
 
-    # Familias MOTOTRBO frecuentes en nombres de firmware.
-    if re.search(r"\bR7\b", spaced) and "R7" not in seen:
-        seen.add("R7")
-        found.append("R7")
-    if re.search(r"\bSLR\b", spaced) and "SLR" not in seen:
-        seen.add("SLR")
-        found.append("SLR")
+    # Dominio MOTOTRBO confirmado a partir de los nombres históricos.
+    if "MOTOTRBO" in compact:
+        # R7EX antes que R7; los límites evitan que R7 capture R7EX.
+        for model in ("R7EX", "R7", "R5", "R2"):
+            if re.search(rf"\b{re.escape(model)}\b", spaced):
+                add(model)
 
-    # Caso histórico concatenado: DGM 5000e8000e -> DGM-5000E, DGM-8000E.
-    dgm_compact = re.search(r"DGM((?:\d{4}E?)+)", _compact)
-    if dgm_compact:
-        for number in re.findall(r"\d{4}E?", dgm_compact.group(1)):
-            value = f"DGM-{number}"
-            if value not in seen:
-                seen.add(value)
-                found.append(value)
+        if re.search(r"\bDGP\b", spaced):
+            add("DGP")
+        if re.search(r"\bDGM\b", spaced):
+            add("DGM")
+        if re.search(r"\bDEM\b", spaced):
+            add("DEM")
+        if re.search(r"\bSLR\b", spaced):
+            add("SLR")
+        if re.search(r"\bDM1XXX\b", spaced):
+            add("DM1XXX")
 
-    return found[:15]
+        # DP1400 / SL1600.
+        if re.search(r"\bDP\s*1400\b", spaced):
+            add("DP-1400")
+        if re.search(r"\bSL\s*1600\b", spaced):
+            add("SL-1600")
 
+        # DGM 5000e8000e -> dos modelos.
+        dgm_concat = re.search(r"\bDGM\s+(\d{4}E\d{4}E)\b", spaced)
+        if dgm_concat:
+            for number in re.findall(r"\d{4}E", dgm_concat.group(1)):
+                add(f"DGM-{number}")
+
+    return found[:20]
 
 def technical_catalog_detect_software(file_name: str, models: list[str]) -> list[str]:
     _raw, _spaced, compact = technical_normalized_parts(file_name)
     result: list[str] = []
 
+    def add(value: str) -> None:
+        if value not in result:
+            result.append(value)
+
     for model in models:
         if model.startswith("KPG-"):
-            result.append(model)
+            add(model)
     if "MOTOTRBO" in compact and "CPS" in compact:
-        result.append("MOTOTRBO CPS")
+        add("MOTOTRBO CPS")
     if "APX" in compact and "CPS" in compact:
-        result.append("APX CPS")
-    return list(dict.fromkeys(result))
-
+        add("APX CPS")
+    if "MOTOTRBO" in compact and "DEPOTTOOL" in compact:
+        add("MOTOTRBO DEPOTTOOL")
+    if "MOTOTRBO" in compact and "BUILD828" in compact and "RM" in compact:
+        add("RM")
+    return result
 
 def technical_catalog_detect_versions(file_name: str) -> list[str]:
     raw = technical_stem(file_name)
+    compact = technical_term_normalized(raw)
     result: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in result:
+            result.append(value)
+
     for pattern in (
         r"(?:^|[_\-\s])V(\d+(?:\.\d+){1,4})(?=$|[_\-\s(])",
         r"(?:^|[_\-\s])R(\d+(?:\.\d+){0,4})(?=$|[_\-\s(])",
     ):
         for match in re.finditer(pattern, raw):
             value = match.group(1)
-            # En nombres MOTOTRBO, R7 es el modelo/familia del equipo, no
-            # una revisión de firmware.
-            if value == "7" and "MOTOTRBOR7" in technical_term_normalized(raw):
+            if "MOTOTRBO" in compact and value in {"2", "5", "7"}:
+                # En nombres de firmware DGP, R2/R5/R7 son modelos, no revisiones.
                 continue
-            if value not in result:
-                result.append(value)
-    return result[:3]
+            add(value)
 
+    # Equivalencias/relaciones confirmadas en el material MOTOTRBO del grupo.
+    if "MOTOTRBOCPS2159" in compact or "MOTOTRBOCPS2V21593840" in compact:
+        add("2.159.384.0")
+    if "MOTOTRBOCPS2V2134760" in compact:
+        add("2.134.76.0")
+    if "MOTOTRBOCPSV16BUILD828STANDALONELA" in compact and "CRACK" not in compact:
+        add("2.134.76.0")
+    if "BUILD828" in compact and "CPS" in compact:
+        add("CPS16 BUILD 828")
+    if "DEPOTTOOLV140" in compact:
+        add("14.0")
+    if "AUDIOFIX10249" in compact:
+        add("1.0.2.49")
+
+    return result[:6]
 
 def technical_catalog_parse(file_name: str) -> dict[str, list[str]]:
     models = technical_catalog_detect_models(file_name)
@@ -3950,47 +4047,72 @@ TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
 
 def technical_query_detect_models(query: str) -> list[str]:
     q = technical_ascii_upper(query)
+    q_spaced = re.sub(r"[^A-Z0-9]+", " ", q)
+    q_spaced = re.sub(r"\s+", " ", q_spaced).strip()
+    q_compact = technical_term_normalized(q)
     result: list[str] = []
     seen: set[str] = set()
 
-    # Compacto KPGD6.
-    for match in re.finditer(r"\bKPG([A-Z]?\d+[A-Z]?)\b", q):
-        value = f"KPG-{match.group(1)}"
-        if value not in seen:
+    def add(value: str) -> None:
+        if value and value not in seen:
             seen.add(value)
             result.append(value)
 
+    for match in re.finditer(r"\bKPG([A-Z]?\d+[A-Z]?)\b", q):
+        add(f"KPG-{match.group(1)}")
+
     for prefix, pattern in TECHNICAL_QUERY_MODEL_PATTERNS:
         for match in re.finditer(pattern, q):
-            value = f"{prefix}-{match.group(1)}"
-            if value not in seen:
-                seen.add(value)
-                result.append(value)
+            add(f"{prefix}-{match.group(1)}")
 
-    # APX N70/NEXT también se reconocen si el usuario omite "APX".
-    if re.search(r"\bN70\b", q) and "APX-N70" not in seen:
-        seen.add("APX-N70")
-        result.append("APX-N70")
-    if re.search(r"\bNEXT\b", q) and "APX-NEXT" not in seen:
-        seen.add("APX-NEXT")
-        result.append("APX-NEXT")
-    if re.search(r"\bR7\b", q) and "R7" not in seen:
-        seen.add("R7")
-        result.append("R7")
-    if re.search(r"\bSLR\b", q) and "SLR" not in seen:
-        seen.add("SLR")
-        result.append("SLR")
+    if re.search(r"\bN70\b", q) or "APXN70" in q_compact:
+        add("APX-N70")
+    if re.search(r"\bNEXT\b", q) and ("APX" in q or "FIRMWARE" in q):
+        add("APX-NEXT")
 
-    # DGM5000e8000e escrito de forma compacta.
-    q_compact = technical_term_normalized(q)
+    # Familias/modelos MOTOTRBO. R2/R5 son ambiguos fuera de contexto.
+    mototrbo_context = any(token in q_compact for token in ("MOTOTRBO", "FIRMWARE", "DGP"))
+    if re.search(r"\bR7EX\b", q):
+        add("R7EX")
+    if re.search(r"\bR7\b", q):
+        add("R7")
+    if mototrbo_context and re.search(r"\bR5\b", q):
+        add("R5")
+    if mototrbo_context and re.search(r"\bR2\b", q):
+        add("R2")
+    for family in ("DGP", "DGM", "DEM", "SLR", "DM1XXX"):
+        if re.search(rf"\b{family}\b", q_spaced):
+            add(family)
+
+    # DGM5000e8000e escrito compacto.
     dgm_compact = re.search(r"DGM((?:\d{4}E?)+)", q_compact)
     if dgm_compact:
+        add("DGM")
         for number in re.findall(r"\d{4}E?", dgm_compact.group(1)):
-            value = f"DGM-{number}"
-            if value not in seen:
-                seen.add(value)
-                result.append(value)
+            add(f"DGM-{number}")
+
     return result
+
+def technical_query_detect_versions(query: str) -> list[str]:
+    q = technical_ascii_upper(query)
+    compact = technical_term_normalized(q)
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in found:
+            found.append(value)
+
+    for match in re.finditer(r"\b(?:V|R)?(\d+\.\d+(?:\.\d+){0,3})\b", q):
+        add(match.group(1))
+
+    if "CPS2159" in compact:
+        add("2.159.384.0")
+    if "CPS2134" in compact:
+        add("2.134.76.0")
+    if re.search(r"\bCPS\s*16(?:\.0)?\s+BUILD\s+828\b", q):
+        add("CPS16 BUILD 828")
+
+    return found
 
 
 def technical_query_detect_aliases(query: str, mapping: dict[str, tuple[str, ...]]) -> list[str]:
@@ -4004,6 +4126,7 @@ def technical_query_detect_aliases(query: str, mapping: dict[str, tuple[str, ...
 
 def technical_query_interpret(query: str) -> dict[str, object]:
     models = technical_query_detect_models(query)
+    versions = technical_query_detect_versions(query)
 
     brands = technical_query_detect_aliases(query, {
         "MOTOROLA": ("MOTOROLA",),
@@ -4031,21 +4154,32 @@ def technical_query_interpret(query: str) -> dict[str, object]:
         "NXDN": ("NXDN",),
         "SDR": ("SDR",),
     })
+
+    q_norm = technical_term_normalized(query)
     resources = technical_query_detect_aliases(query, {
         "CPS": ("CPS", "SOFTWARE DE PROGRAMACION", "SOFTWARE PROGRAMACION"),
         "FIRMWARE": ("FIRMWARE", " FW "),
         "DRIVER": ("DRIVER", "CONTROLADOR"),
         "CODEPLUG": ("CODEPLUG",),
-        "MANUAL": ("MANUAL", "MANUAL DE SERVICIO"),
+        "MANUAL": ("MANUAL", "MANUAL DE SERVICIO", "MANUALES DE SERVICIO"),
+        "SERVICE_MANUAL": ("MANUAL DE SERVICIO", "MANUALES DE SERVICIO"),
         "DEPOT": ("DEPOT",),
+        "DEPOTTOOL": ("DEPOTTOOL", "DEPOT TOOL"),
         "RSS": ("RSS",),
         "RESET": ("RESET",),
         "PATCH": ("PATCH", "PARCHE"),
         "CRACK": ("CRACK",),
-        "TUNER": ("TUNER",),
+        "TUNER": ("TUNER", "TUNERS", "CALIBRACION", "CALIBRAR"),
+        "USERDATA": ("USERDATA", "USERDATAS"),
+        "AUDIO_PATCH": ("PARCHE DE AUDIO", "AUDIOFIX"),
         "UPGRADE": ("UPGRADE", "UPDATER"),
         "DOWNGRADE": ("DOWNGRADE",),
     })
+
+    # "programa CPS" significa software principal, no patch/crack.
+    if "CPS" in q_norm and any(token in q_norm for token in ("PROGRAMA", "SOFTWARE")):
+        if "CPS_SOFTWARE" not in resources:
+            resources.append("CPS_SOFTWARE")
 
     equipment_classes = technical_query_detect_aliases(query, {
         "PORTABLE": ("PORTABLE", "PORTATIL", "PORTATILES"),
@@ -4053,11 +4187,14 @@ def technical_query_interpret(query: str) -> dict[str, object]:
         "REPEATER": ("REPEATER", "REPETIDOR", "REPETIDORES"),
     })
 
-    # Familias y modelos fuertes implican marca. Evita mezclar plataformas.
     inferred_brand = None
     if "MOTOTRBO" in technologies or "APX" in technologies or "ASTRO" in technologies:
         inferred_brand = "MOTOROLA"
-    elif any(m.startswith(("APX-", "XTS-", "XTL-", "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-", "DGM-", "DEM-")) or m in {"R7", "SLR"} for m in models):
+    elif any(
+        m.startswith(("APX-", "XTS-", "XTL-", "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-", "DGM-", "DEM-"))
+        or m in {"R2", "R5", "R7", "R7EX", "DGP", "DGM", "DEM", "SLR", "DM1XXX"}
+        for m in models
+    ):
         inferred_brand = "MOTOROLA"
     elif any(m.startswith(("KPG-", "NX-", "NXR-", "TKR-", "TK-")) for m in models):
         inferred_brand = "KENWOOD"
@@ -4066,9 +4203,8 @@ def technical_query_interpret(query: str) -> dict[str, object]:
     if inferred_brand and inferred_brand not in brands:
         brands.append(inferred_brand)
 
-    q_norm = technical_term_normalized(query)
     flags = {
-        "wants_software": any(token in q_norm for token in ("SOFTWARE", "PROGRAMACION", "PROGRAMMING")),
+        "wants_software": any(token in q_norm for token in ("SOFTWARE", "PROGRAMA", "PROGRAMACION", "PROGRAMMING")),
         "wants_cps": "CPS" in q_norm,
         "patch": "PATCH" in q_norm or "PARCHE" in q_norm,
         "crack": "CRACK" in q_norm,
@@ -4083,10 +4219,10 @@ def technical_query_interpret(query: str) -> dict[str, object]:
         "brands": brands,
         "technologies": technologies,
         "resources": resources,
+        "versions": versions,
         "equipment_classes": equipment_classes,
         "flags": flags,
     }
-
 
 def technical_catalog_fetch_exact(
     chat_id: int,
@@ -4148,6 +4284,7 @@ def technical_catalog_rank(
         "RESOURCE": "resources",
         "TECHNOLOGY": "technologies",
         "SOFTWARE": "software",
+        "VERSION": "versions",
         "MODEL": "models",
         "EQUIPMENT_CLASS": "equipment_classes",
     }
@@ -4156,6 +4293,7 @@ def technical_catalog_rank(
         "RESOURCE": 45.0,
         "TECHNOLOGY": 40.0,
         "SOFTWARE": 110.0,
+        "VERSION": 80.0,
         "MODEL": 100.0,
         "EQUIPMENT_CLASS": 70.0,
     }
@@ -4169,6 +4307,10 @@ def technical_catalog_rank(
     if flags["wants_software"]:
         if str(row["software"] or ""):
             score += 45.0
+        if technical_catalog_field_has(row, "resources", "CPS_SOFTWARE"):
+            score += 60.0
+        if technical_catalog_field_has(row, "resources", "CPS_PATCH"):
+            score -= 50.0
         if technical_catalog_field_has(row, "resources", "CPS"):
             score += 35.0
         if "KPG" in name_compact:
@@ -4177,17 +4319,9 @@ def technical_catalog_rank(
     if flags["wants_cps"] and technical_catalog_field_has(row, "resources", "CPS"):
         score += 25.0
     elif flags["wants_cps"] and str(row["software"] or ""):
-        # Algunos softwares de programación (por ejemplo KPG-D6) no llevan
-        # literalmente "CPS" en el nombre, pero son el software buscado.
         score += 45.0
 
-    # Para búsquedas CPS genéricas, el paquete principal debe ir antes que
-    # parches, cracks, wideband, analog support o downgrades.
-    if flags["wants_cps"] and (
-        "CPS2" in name_compact
-        or "STANDALONE" in name_compact
-        or "FAMILYCPS" in name_compact
-    ):
+    if flags["wants_cps"] and technical_catalog_field_has(row, "resources", "CPS_SOFTWARE"):
         score += 30.0
 
     specials = (
@@ -4210,7 +4344,6 @@ def technical_catalog_rank(
         score += 60.0 if flags["analog_support"] else -35.0
 
     return score
-
 
 TECHNICAL_SEARCH_EXTENSIONS = (".rar", ".zip", ".7z", ".exe")
 
@@ -4235,12 +4368,14 @@ def technical_catalog_search_rows(
     brands = list(parsed["brands"])
     technologies = list(parsed["technologies"])
     resources = list(parsed["resources"])
+    versions = list(parsed["versions"])
     equipment_classes = list(parsed["equipment_classes"])
 
     base: list[tuple[str, str]] = []
     base.extend(("BRAND", value) for value in brands)
     base.extend(("TECHNOLOGY", value) for value in technologies)
     base.extend(("RESOURCE", value) for value in resources)
+    base.extend(("VERSION", value) for value in versions)
     base.extend(("EQUIPMENT_CLASS", value) for value in equipment_classes)
 
     structured = bool(base or models)
