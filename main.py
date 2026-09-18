@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.13-admin-dashboard"
+VERSION = "2.8.16-firmware-equipment-class"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -283,6 +283,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v4.2-equipment-class"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -976,6 +977,47 @@ class Database:
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, message_id, notice_type)
             );
+
+            -- Catálogo técnico paralelo. No participa en la decisión de duplicados:
+            -- file_fingerprints + SHA-256 siguen siendo la autoridad del sistema.
+            CREATE TABLE IF NOT EXISTS technical_file_catalog (
+                chat_id INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                file_unique_id TEXT,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                sender_id INTEGER,
+                sender_name TEXT,
+                first_seen TEXT,
+                brands TEXT NOT NULL DEFAULT '',
+                resources TEXT NOT NULL DEFAULT '',
+                technologies TEXT NOT NULL DEFAULT '',
+                software TEXT NOT NULL DEFAULT '',
+                versions TEXT NOT NULL DEFAULT '',
+                models TEXT NOT NULL DEFAULT '',
+                equipment_classes TEXT NOT NULL DEFAULT '',
+                search_text TEXT NOT NULL DEFAULT '',
+                parser_version TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, sha256)
+            );
+
+            CREATE TABLE IF NOT EXISTS technical_file_terms (
+                chat_id INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                term_type TEXT NOT NULL,
+                term_value TEXT NOT NULL,
+                normalized_value TEXT NOT NULL,
+                PRIMARY KEY(chat_id, sha256, term_type, normalized_value)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_technical_catalog_message
+                ON technical_file_catalog(chat_id, message_id);
+            CREATE INDEX IF NOT EXISTS idx_technical_terms_lookup
+                ON technical_file_terms(chat_id, term_type, normalized_value);
+            CREATE INDEX IF NOT EXISTS idx_technical_terms_any
+                ON technical_file_terms(chat_id, normalized_value);
             
 
             -- Memoria histórica de conversaciones. Está separada de file_fingerprints
@@ -1043,6 +1085,20 @@ class Database:
                 ON conversation_qa_pairs(chat_id, status);
             """
         )
+
+        # Migración aditiva del catálogo técnico. La tabla puede existir desde
+        # 2.8.14/2.8.15 sin equipment_classes. Solo afecta esta capa derivada;
+        # no modifica file_fingerprints ni la lógica SHA-256.
+        technical_columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(technical_file_catalog)").fetchall()
+        }
+        if "equipment_classes" not in technical_columns:
+            self.conn.execute(
+                "ALTER TABLE technical_file_catalog "
+                "ADD COLUMN equipment_classes TEXT NOT NULL DEFAULT ''"
+            )
+
         self.conn.commit()
 
     def _ensure_defaults(self) -> None:
@@ -3307,7 +3363,7 @@ def archive_name_matches_anchor(file_name: str, anchor: str) -> bool:
     )
 
 
-def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MAX_RESULTS) -> list[sqlite3.Row]:
+def search_archive_rows_legacy(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MAX_RESULTS) -> list[sqlite3.Row]:
     terms = extract_archive_terms(query)
     if not terms:
         return []
@@ -3361,6 +3417,923 @@ def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MA
         reverse=True,
     )
     return [row for _, row in ranked[:max(1, min(12, limit))]]
+
+
+# ---------------------------------------------------------------------------
+# Catálogo técnico estructurado (2.8.14)
+# ---------------------------------------------------------------------------
+
+def technical_ascii_upper(value: str) -> str:
+    value = unicodedata.normalize("NFD", value or "")
+    return "".join(
+        ch for ch in value.upper()
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def technical_stem(file_name: str) -> str:
+    return re.sub(
+        r"\.(RAR|ZIP|7Z|EXE)$",
+        "",
+        technical_ascii_upper(file_name).strip(),
+    )
+
+
+def technical_normalized_parts(value: str) -> tuple[str, str, str]:
+    raw = technical_stem(value)
+    spaced = re.sub(r"[^A-Z0-9]+", " ", raw)
+    spaced = re.sub(r"\s+", " ", spaced).strip()
+    compact = re.sub(r"[^A-Z0-9]", "", raw)
+    return raw, spaced, compact
+
+
+def technical_term_normalized(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", technical_ascii_upper(value))
+
+
+def technical_catalog_detect_brands(file_name: str) -> list[str]:
+    _raw, spaced, compact = technical_normalized_parts(file_name)
+    found: list[str] = []
+
+    if (
+        re.search(r"\bMOTOROLA\b", spaced)
+        or "MOTOTRBO" in compact
+        or compact.startswith("APX")
+        or re.search(
+            r"\b(?:XTS|XTL|DEP|DGP|DP|EM|EP|GM|GP|PRO)\s*\d+",
+            spaced,
+        )
+    ):
+        found.append("MOTOROLA")
+
+    if (
+        re.search(r"\bKENWOOD\b", spaced)
+        or re.search(r"\b(?:KPG|NX|NXR|TKR|TK)\s*[A-Z]?\d+", spaced)
+        or re.match(r"^KPG[A-Z]*\d+", compact)
+    ):
+        found.append("KENWOOD")
+
+    if (
+        re.search(r"\bHYTERA\b", spaced)
+        or re.search(r"\b(?:PD|HP|HM|HR|PNC)\s*\d+", spaced)
+    ):
+        found.append("HYTERA")
+
+    others = {
+        "ICOM": r"\bICOM\b",
+        "YAESU": r"\bYAESU\b",
+        "BAOFENG": r"\bBAOFENG\b",
+        "VERTEX": r"\bVERTEX\b",
+        "RETEVIS": r"\bRETEVIS\b",
+        "TYT": r"\bTYT\b",
+        "SEPURA": r"\bSEPURA\b",
+        "TAIT": r"\bTAIT\b",
+        "ABELL": r"\bABELL\b",
+        "ALINCO": r"\bALINCO\b",
+        "ANYTONE": r"\bANYTONE\b",
+    }
+    for brand, pattern in others.items():
+        if re.search(pattern, spaced):
+            found.append(brand)
+
+    return found
+
+
+def technical_catalog_detect_resources(file_name: str) -> list[str]:
+    _raw, spaced, compact = technical_normalized_parts(file_name)
+
+    # Los paquetes MOTOTRBO de firmware históricos suelen no decir
+    # literalmente "firmware". Se reconocen por el esquema de versión/release
+    # usado en el grupo, por ejemplo:
+    # MOTOTRBO_R7_R0226011000_262106_Portable_LA.zip
+    # MOTOTRBO_2.0_R20260103_266102_Repeater SLR.zip
+    mototrbo_release_firmware = (
+        "MOTOTRBO" in compact
+        and re.search(r"\bR\d{8,12}\b", spaced) is not None
+        and re.search(
+            r"\b(?:PORTABLE|MOBILE|REPEATER|DGM|DEM|SLR|R7|LIGHT)\b",
+            spaced,
+        ) is not None
+    )
+
+    # Este archivo es una herramienta/paquete de downgrade, no un firmware
+    # normal, aunque incluya "FW" en el nombre.
+    mototrbo_cps_downgrade = (
+        "MOTOTRBOCPS" in compact
+        and "DOWNGRADE" in compact
+    )
+
+    tests = {
+        "CPS": (
+            re.search(r"\bCPS(?:\s*\d+)?\b", spaced)
+            or "MULTICPS" in compact
+            or "APXCPS" in compact
+            or "MOTOTRBOCPS" in compact
+        ),
+        "FIRMWARE": (
+            not mototrbo_cps_downgrade
+            and (
+                re.search(r"\bFIRMWARE\b", spaced)
+                or re.search(r"\bFW\b", spaced)
+                or mototrbo_release_firmware
+            )
+        ),
+        "UPGRADE": (
+            re.search(r"\bUPGRADE\b", spaced)
+            or re.search(r"\bUPDATER\b", spaced)
+            or "UPGRADEKIT" in compact
+        ),
+        "FLASH": (
+            re.search(r"\bFLASH\b", spaced)
+            or "FLASHBURN" in compact
+        ),
+        "DRIVER": re.search(r"\bDRIVER\b", spaced),
+        "CODEPLUG": "CODEPLUG" in compact,
+        "MANUAL": (
+            re.search(r"\bMANUAL(?:ES)?\b", spaced)
+            or re.search(r"\bSERVICE\s+MANUAL\b", spaced)
+        ),
+        "DEPOT": re.search(r"\bDEPOT\b", spaced),
+        "RSS": re.search(r"\bRSS\b", spaced),
+        "RECOVERY": re.search(r"\bRECOVERY\b", spaced),
+        "RESET": "RESET" in compact,
+        "PATCH": (
+            re.search(r"\bPATCH(?:ES|ED)?\b", spaced)
+            or "PATCH" in compact
+        ),
+        "CRACK": re.search(r"\bCRACKS?\b", spaced),
+        "TUNER": re.search(r"\bTUNER\b", spaced),
+        "DOWNGRADE": re.search(r"\bDOWNGRADE\b", spaced),
+    }
+    return [key for key, value in tests.items() if value]
+
+
+def technical_catalog_detect_equipment_classes(file_name: str) -> list[str]:
+    """Clasifica el tipo físico de equipo cuando el nombre lo permite.
+
+    Se prioriza información explícita del nombre (PORTABLE/MOBILE/REPEATER).
+    También se aplican unas pocas inferencias fuertes ya confirmadas en el
+    catálogo: XTS=portátil, DGM/DEM=móvil y SLR=repetidor. Si no hay evidencia
+    suficiente, se deja vacío en vez de inventar una clase.
+    """
+    _raw, spaced, compact = technical_normalized_parts(file_name)
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        if value not in found:
+            found.append(value)
+
+    if re.search(r"\bPORTABLES?\b", spaced):
+        add("PORTABLE")
+    if re.search(r"\bMOBILES?\b", spaced):
+        add("MOBILE")
+    if re.search(r"\bREPEATERS?\b", spaced):
+        add("REPEATER")
+
+    # Inferencias fuertes confirmadas por la nomenclatura del grupo.
+    if re.search(r"\bXTS\s*\d+", spaced):
+        add("PORTABLE")
+    if re.search(r"\b(?:DGM|DEM)\s*\d+", spaced):
+        add("MOBILE")
+    if re.search(r"\bSLR\b", spaced):
+        add("REPEATER")
+
+    return found
+
+
+def technical_catalog_detect_technologies(file_name: str) -> list[str]:
+    _raw, spaced, compact = technical_normalized_parts(file_name)
+    found: list[str] = []
+
+    if (
+        re.search(r"\bDMR\b", spaced)
+        or "DMRCT" in compact
+        or compact.startswith("DMR")
+    ):
+        found.append("DMR")
+    if "MOTOTRBO" in compact:
+        found.append("MOTOTRBO")
+    if "APX" in compact:
+        found.append("APX")
+    if (
+        "ASTRO" in compact
+        or re.search(r"\b(?:XTS|XTL)\s*\d+", spaced)
+    ):
+        found.append("ASTRO")
+    for tech in ("P25", "TETRA", "NXDN", "SDR"):
+        if tech in compact:
+            found.append(tech)
+    return found
+
+
+TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
+    ("KPG", r"\bKPG\s*([A-Z]?\d+[A-Z]?)\b"),
+    ("NX",  r"\bNX\s*(\d{3,4})\b"),
+    ("NXR", r"\bNXR\s*(\d{3,4})\b"),
+    ("TKR", r"\bTKR\s*(\d{3,4})\b"),
+    ("TK",  r"\bTK\s*(\d{3,4})\b"),
+    ("XTS", r"\bXTS\s*(\d{3,5})\b"),
+    ("XTL", r"\bXTL\s*(\d{3,5})\b"),
+    ("DEP", r"\bDEP\s*(\d{3,5})\b"),
+    ("DGP", r"\bDGP\s*(\d{3,5}[A-Z]?)\b"),
+    ("DP",  r"\bDP\s*(\d{3,5}[A-Z]?)\b"),
+    ("EM",  r"\bEM\s*(\d{3,4})\b"),
+    ("EP",  r"\bEP\s*(\d{3,4})\b"),
+    ("GM",  r"\bGM\s*(\d{3,4}[A-Z]?)\b"),
+    ("GP",  r"\bGP\s*(\d{3,4}[A-Z]?)\b"),
+    ("PRO", r"\bPRO\s*(\d{4,5})\b"),
+    ("DGM", r"\bDGM\s*(\d{4}[A-Z]?)\b"),
+    ("DEM", r"\bDEM\s*(\d{3,4}[A-Z]?)\b"),
+    ("PD",  r"\bPD\s*(\d{3,4})\b"),
+    ("HP",  r"\bHP\s*(\d{3,4})\b"),
+    ("HM",  r"\bHM\s*(\d{3,4})\b"),
+    ("HR",  r"\bHR\s*(\d{3,4})\b"),
+    ("PNC", r"\bPNC\s*(\d+[A-Z]?)\b"),
+    ("VXR", r"\bVXR\s*(\d+)\b"),
+    ("MD",  r"\bMD\s*(\d{3,4})\b"),
+    ("TC",  r"\bTC\s*(\d{3,4})\b"),
+    ("FT",  r"\bFT\s*(\d{3,4})\b"),
+    ("UV",  r"\bUV\s*(\d+[A-Z]*)\b"),
+)
+
+
+def technical_catalog_detect_models(file_name: str) -> list[str]:
+    raw, spaced, _compact = technical_normalized_parts(file_name)
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for prefix, pattern in TECHNICAL_MODEL_RULES:
+        for match in re.finditer(pattern, spaced):
+            value = f"{prefix}-{match.group(1)}"
+            if value not in seen:
+                seen.add(value)
+                found.append(value)
+
+    # Casos compactos legítimos: KPGD6, KPG166D.
+    for match in re.finditer(
+        r"(?<![A-Z0-9])KPG([A-Z]?\d+[A-Z]?)(?![A-Z0-9])",
+        raw,
+    ):
+        value = f"KPG-{match.group(1)}"
+        if value not in seen:
+            seen.add(value)
+            found.append(value)
+
+    # Ej.: NX-1200, 1202,1300,1302,1700,1800.
+    nx_match = re.search(
+        r"\bNX[-_ ]?(\d{3,4})((?:\s*[,;/]\s*\d{3,4})+)",
+        raw,
+    )
+    if nx_match:
+        numbers = [nx_match.group(1)] + re.findall(r"\d{3,4}", nx_match.group(2))
+        for number in numbers:
+            value = f"NX-{number}"
+            if value not in seen:
+                seen.add(value)
+                found.append(value)
+
+    # Familias Motorola APX N70 / APX NEXT.
+    if re.search(r"\bAPX\s+N70\b", spaced) or "APXN70" in _compact:
+        if "APX-N70" not in seen:
+            seen.add("APX-N70")
+            found.append("APX-N70")
+    if re.search(r"\bAPX\s+NEXT\b", spaced) or "APXNEXT" in _compact:
+        if "APX-NEXT" not in seen:
+            seen.add("APX-NEXT")
+            found.append("APX-NEXT")
+
+    # Familias MOTOTRBO frecuentes en nombres de firmware.
+    if re.search(r"\bR7\b", spaced) and "R7" not in seen:
+        seen.add("R7")
+        found.append("R7")
+    if re.search(r"\bSLR\b", spaced) and "SLR" not in seen:
+        seen.add("SLR")
+        found.append("SLR")
+
+    # Caso histórico concatenado: DGM 5000e8000e -> DGM-5000E, DGM-8000E.
+    dgm_compact = re.search(r"DGM((?:\d{4}E?)+)", _compact)
+    if dgm_compact:
+        for number in re.findall(r"\d{4}E?", dgm_compact.group(1)):
+            value = f"DGM-{number}"
+            if value not in seen:
+                seen.add(value)
+                found.append(value)
+
+    return found[:15]
+
+
+def technical_catalog_detect_software(file_name: str, models: list[str]) -> list[str]:
+    _raw, _spaced, compact = technical_normalized_parts(file_name)
+    result: list[str] = []
+
+    for model in models:
+        if model.startswith("KPG-"):
+            result.append(model)
+    if "MOTOTRBO" in compact and "CPS" in compact:
+        result.append("MOTOTRBO CPS")
+    if "APX" in compact and "CPS" in compact:
+        result.append("APX CPS")
+    return list(dict.fromkeys(result))
+
+
+def technical_catalog_detect_versions(file_name: str) -> list[str]:
+    raw = technical_stem(file_name)
+    result: list[str] = []
+    for pattern in (
+        r"(?:^|[_\-\s])V(\d+(?:\.\d+){1,4})(?=$|[_\-\s(])",
+        r"(?:^|[_\-\s])R(\d+(?:\.\d+){0,4})(?=$|[_\-\s(])",
+    ):
+        for match in re.finditer(pattern, raw):
+            value = match.group(1)
+            # En nombres MOTOTRBO, R7 es el modelo/familia del equipo, no
+            # una revisión de firmware.
+            if value == "7" and "MOTOTRBOR7" in technical_term_normalized(raw):
+                continue
+            if value not in result:
+                result.append(value)
+    return result[:3]
+
+
+def technical_catalog_parse(file_name: str) -> dict[str, list[str]]:
+    models = technical_catalog_detect_models(file_name)
+    return {
+        "BRAND": technical_catalog_detect_brands(file_name),
+        "RESOURCE": technical_catalog_detect_resources(file_name),
+        "TECHNOLOGY": technical_catalog_detect_technologies(file_name),
+        "SOFTWARE": technical_catalog_detect_software(file_name, models),
+        "VERSION": technical_catalog_detect_versions(file_name),
+        "MODEL": models,
+        "EQUIPMENT_CLASS": technical_catalog_detect_equipment_classes(file_name),
+    }
+
+
+def _technical_catalog_upsert_conn(conn: sqlite3.Connection, row: sqlite3.Row | dict) -> None:
+    file_name = str(row["file_name"] or "").strip()
+    parsed = technical_catalog_parse(file_name)
+    now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+
+    brands = parsed["BRAND"]
+    resources = parsed["RESOURCE"]
+    technologies = parsed["TECHNOLOGY"]
+    software = parsed["SOFTWARE"]
+    versions = parsed["VERSION"]
+    models = parsed["MODEL"]
+    equipment_classes = parsed["EQUIPMENT_CLASS"]
+
+    search_parts = [
+        file_name,
+        *brands,
+        *resources,
+        *technologies,
+        *software,
+        *versions,
+        *models,
+        *equipment_classes,
+    ]
+    search_text = " | ".join(part for part in search_parts if part)
+
+    conn.execute(
+        """
+        INSERT INTO technical_file_catalog (
+            chat_id, sha256, message_id, file_unique_id, file_name, file_size,
+            sender_id, sender_name, first_seen, brands, resources, technologies,
+            software, versions, models, equipment_classes, search_text, parser_version, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, sha256) DO UPDATE SET
+            message_id = excluded.message_id,
+            file_unique_id = excluded.file_unique_id,
+            file_name = excluded.file_name,
+            file_size = excluded.file_size,
+            sender_id = excluded.sender_id,
+            sender_name = excluded.sender_name,
+            first_seen = excluded.first_seen,
+            brands = excluded.brands,
+            resources = excluded.resources,
+            technologies = excluded.technologies,
+            software = excluded.software,
+            versions = excluded.versions,
+            models = excluded.models,
+            equipment_classes = excluded.equipment_classes,
+            search_text = excluded.search_text,
+            parser_version = excluded.parser_version,
+            updated_at = excluded.updated_at
+        """,
+        (
+            int(row["chat_id"]),
+            str(row["sha256"]),
+            int(row["message_id"]),
+            str(row["file_unique_id"] or ""),
+            file_name,
+            int(row["file_size"] or 0),
+            int(row["sender_id"] or 0),
+            str(row["sender_name"] or ""),
+            str(row["first_seen"] or ""),
+            " | ".join(brands),
+            " | ".join(resources),
+            " | ".join(technologies),
+            " | ".join(software),
+            " | ".join(versions),
+            " | ".join(models),
+            " | ".join(equipment_classes),
+            search_text,
+            TECHNICAL_CATALOG_PARSER_VERSION,
+            now,
+        ),
+    )
+
+    conn.execute(
+        "DELETE FROM technical_file_terms WHERE chat_id = ? AND sha256 = ?",
+        (int(row["chat_id"]), str(row["sha256"])),
+    )
+    for term_type, values in parsed.items():
+        for value in values:
+            normalized_value = technical_term_normalized(value)
+            if not normalized_value:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO technical_file_terms (
+                    chat_id, sha256, term_type, term_value, normalized_value
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(row["chat_id"]),
+                    str(row["sha256"]),
+                    term_type,
+                    value,
+                    normalized_value,
+                ),
+            )
+
+
+def technical_catalog_sync_group(chat_id: int) -> tuple[int, int]:
+    """Reconcilia el catálogo paralelo con file_fingerprints sin tocar SHA-256."""
+    with db.lock:
+        rows = db.conn.execute(
+            """
+            SELECT chat_id, sha256, message_id, file_unique_id, file_name,
+                   file_size, sender_id, sender_name, first_seen
+            FROM file_fingerprints
+            WHERE chat_id = ?
+            ORDER BY message_id
+            """,
+            (chat_id,),
+        ).fetchall()
+
+        with db.conn:
+            for row in rows:
+                _technical_catalog_upsert_conn(db.conn, row)
+
+        catalog_count = int(db.conn.execute(
+            "SELECT COUNT(*) FROM technical_file_catalog WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()[0])
+    return len(rows), catalog_count
+
+
+def technical_catalog_upsert_fingerprint(
+    *,
+    chat_id: int,
+    sha256: str,
+    message_id: int,
+    file_unique_id: str,
+    file_name: str,
+    file_size: int,
+    sender_id: int,
+    sender_name: str,
+) -> None:
+    """Añade/actualiza SOLO el catálogo después de registrar una huella original."""
+    with db.lock:
+        row = db.conn.execute(
+            """
+            SELECT chat_id, sha256, message_id, file_unique_id, file_name,
+                   file_size, sender_id, sender_name, first_seen
+            FROM file_fingerprints
+            WHERE chat_id = ? AND sha256 = ?
+            LIMIT 1
+            """,
+            (chat_id, sha256),
+        ).fetchone()
+        if row is None:
+            return
+        with db.conn:
+            _technical_catalog_upsert_conn(db.conn, row)
+
+
+TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("KPG", r"\bKPG[-_ ]?([A-Z]?\d+[A-Z]?)\b"),
+    ("NX",  r"\bNX[-_ ]?(\d{3,4})\b"),
+    ("NXR", r"\bNXR[-_ ]?(\d{3,4})\b"),
+    ("TKR", r"\bTKR[-_ ]?(\d{3,4})\b"),
+    ("TK",  r"\bTK[-_ ]?(\d{3,4})\b"),
+    ("XTS", r"\bXTS[-_ ]?(\d{3,5})\b"),
+    ("XTL", r"\bXTL[-_ ]?(\d{3,5})\b"),
+    ("DEP", r"\bDEP[-_ ]?(\d{3,5})\b"),
+    ("DGP", r"\bDGP[-_ ]?(\d{3,5}[A-Z]?)\b"),
+    ("DP",  r"\bDP[-_ ]?(\d{3,5}[A-Z]?)\b"),
+    ("EM",  r"\bEM[-_ ]?(\d{3,4})\b"),
+    ("EP",  r"\bEP[-_ ]?(\d{3,4})\b"),
+    ("GM",  r"\bGM[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("GP",  r"\bGP[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("PRO", r"\bPRO[-_ ]?(\d{4,5})\b"),
+    ("DGM", r"\bDGM[-_ ]?(\d{4}[A-Z]?)\b"),
+    ("DEM", r"\bDEM[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("PD",  r"\bPD[-_ ]?(\d{3,4})\b"),
+    ("HP",  r"\bHP[-_ ]?(\d{3,4})\b"),
+    ("HM",  r"\bHM[-_ ]?(\d{3,4})\b"),
+    ("HR",  r"\bHR[-_ ]?(\d{3,4})\b"),
+    ("PNC", r"\bPNC[-_ ]?(\d+[A-Z]?)\b"),
+)
+
+
+def technical_query_detect_models(query: str) -> list[str]:
+    q = technical_ascii_upper(query)
+    result: list[str] = []
+    seen: set[str] = set()
+
+    # Compacto KPGD6.
+    for match in re.finditer(r"\bKPG([A-Z]?\d+[A-Z]?)\b", q):
+        value = f"KPG-{match.group(1)}"
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+
+    for prefix, pattern in TECHNICAL_QUERY_MODEL_PATTERNS:
+        for match in re.finditer(pattern, q):
+            value = f"{prefix}-{match.group(1)}"
+            if value not in seen:
+                seen.add(value)
+                result.append(value)
+
+    # APX N70/NEXT también se reconocen si el usuario omite "APX".
+    if re.search(r"\bN70\b", q) and "APX-N70" not in seen:
+        seen.add("APX-N70")
+        result.append("APX-N70")
+    if re.search(r"\bNEXT\b", q) and "APX-NEXT" not in seen:
+        seen.add("APX-NEXT")
+        result.append("APX-NEXT")
+    if re.search(r"\bR7\b", q) and "R7" not in seen:
+        seen.add("R7")
+        result.append("R7")
+    if re.search(r"\bSLR\b", q) and "SLR" not in seen:
+        seen.add("SLR")
+        result.append("SLR")
+
+    # DGM5000e8000e escrito de forma compacta.
+    q_compact = technical_term_normalized(q)
+    dgm_compact = re.search(r"DGM((?:\d{4}E?)+)", q_compact)
+    if dgm_compact:
+        for number in re.findall(r"\d{4}E?", dgm_compact.group(1)):
+            value = f"DGM-{number}"
+            if value not in seen:
+                seen.add(value)
+                result.append(value)
+    return result
+
+
+def technical_query_detect_aliases(query: str, mapping: dict[str, tuple[str, ...]]) -> list[str]:
+    q_compact = technical_term_normalized(query)
+    found: list[str] = []
+    for canonical, aliases in mapping.items():
+        if any(technical_term_normalized(alias) in q_compact for alias in aliases):
+            found.append(canonical)
+    return found
+
+
+def technical_query_interpret(query: str) -> dict[str, object]:
+    models = technical_query_detect_models(query)
+
+    brands = technical_query_detect_aliases(query, {
+        "MOTOROLA": ("MOTOROLA",),
+        "KENWOOD": ("KENWOOD",),
+        "HYTERA": ("HYTERA",),
+        "ICOM": ("ICOM",),
+        "YAESU": ("YAESU",),
+        "BAOFENG": ("BAOFENG", "BEAOFENG"),
+        "VERTEX": ("VERTEX",),
+        "RETEVIS": ("RETEVIS",),
+        "TYT": ("TYT",),
+        "SEPURA": ("SEPURA",),
+        "TAIT": ("TAIT",),
+        "ABELL": ("ABELL",),
+        "ALINCO": ("ALINCO",),
+        "ANYTONE": ("ANYTONE",),
+    })
+    technologies = technical_query_detect_aliases(query, {
+        "MOTOTRBO": ("MOTOTRBO", "MOTORTRBO", "MOTORBO", "MOTOTURBO", "MOTRBO"),
+        "APX": ("APX",),
+        "ASTRO": ("ASTRO", "XTS"),
+        "DMR": ("DMR",),
+        "P25": ("P25",),
+        "TETRA": ("TETRA",),
+        "NXDN": ("NXDN",),
+        "SDR": ("SDR",),
+    })
+    resources = technical_query_detect_aliases(query, {
+        "CPS": ("CPS", "SOFTWARE DE PROGRAMACION", "SOFTWARE PROGRAMACION"),
+        "FIRMWARE": ("FIRMWARE", " FW "),
+        "DRIVER": ("DRIVER", "CONTROLADOR"),
+        "CODEPLUG": ("CODEPLUG",),
+        "MANUAL": ("MANUAL", "MANUAL DE SERVICIO"),
+        "DEPOT": ("DEPOT",),
+        "RSS": ("RSS",),
+        "RESET": ("RESET",),
+        "PATCH": ("PATCH", "PARCHE"),
+        "CRACK": ("CRACK",),
+        "TUNER": ("TUNER",),
+        "UPGRADE": ("UPGRADE", "UPDATER"),
+        "DOWNGRADE": ("DOWNGRADE",),
+    })
+
+    equipment_classes = technical_query_detect_aliases(query, {
+        "PORTABLE": ("PORTABLE", "PORTATIL", "PORTATILES"),
+        "MOBILE": ("MOBILE", "MOVIL", "MOVILES"),
+        "REPEATER": ("REPEATER", "REPETIDOR", "REPETIDORES"),
+    })
+
+    # Familias y modelos fuertes implican marca. Evita mezclar plataformas.
+    inferred_brand = None
+    if "MOTOTRBO" in technologies or "APX" in technologies or "ASTRO" in technologies:
+        inferred_brand = "MOTOROLA"
+    elif any(m.startswith(("APX-", "XTS-", "XTL-", "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-", "DGM-", "DEM-")) or m in {"R7", "SLR"} for m in models):
+        inferred_brand = "MOTOROLA"
+    elif any(m.startswith(("KPG-", "NX-", "NXR-", "TKR-", "TK-")) for m in models):
+        inferred_brand = "KENWOOD"
+    elif any(m.startswith(("PD-", "HP-", "HM-", "HR-", "PNC-")) for m in models):
+        inferred_brand = "HYTERA"
+    if inferred_brand and inferred_brand not in brands:
+        brands.append(inferred_brand)
+
+    q_norm = technical_term_normalized(query)
+    flags = {
+        "wants_software": any(token in q_norm for token in ("SOFTWARE", "PROGRAMACION", "PROGRAMMING")),
+        "wants_cps": "CPS" in q_norm,
+        "patch": "PATCH" in q_norm or "PARCHE" in q_norm,
+        "crack": "CRACK" in q_norm,
+        "downgrade": "DOWNGRADE" in q_norm,
+        "firmware": "FIRMWARE" in q_norm,
+        "reset": "RESET" in q_norm,
+        "wideband": "WIDEBAND" in q_norm or "25KHZ" in q_norm,
+        "analog_support": "ANALOGSUPPORT" in q_norm or "SOPORTEANALOG" in q_norm,
+    }
+    return {
+        "models": models,
+        "brands": brands,
+        "technologies": technologies,
+        "resources": resources,
+        "equipment_classes": equipment_classes,
+        "flags": flags,
+    }
+
+
+def technical_catalog_fetch_exact(
+    chat_id: int,
+    requirements: list[tuple[str, str]],
+) -> list[sqlite3.Row]:
+    if not requirements:
+        return []
+
+    clauses: list[str] = []
+    params: list[object] = [chat_id]
+    for term_type, value in requirements:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM technical_file_terms t
+                WHERE t.chat_id = c.chat_id
+                  AND t.sha256 = c.sha256
+                  AND t.term_type = ?
+                  AND t.normalized_value = ?
+            )
+            """
+        )
+        params.extend([term_type, technical_term_normalized(value)])
+
+    sql = f"""
+        SELECT c.chat_id, c.sha256, c.message_id, c.file_unique_id, c.file_name,
+               c.file_size, c.sender_id, c.sender_name, c.first_seen,
+               c.brands, c.resources, c.technologies, c.software,
+               c.versions, c.models, c.equipment_classes, c.search_text
+        FROM technical_file_catalog c
+        WHERE c.chat_id = ?
+          AND {' AND '.join(clauses)}
+    """
+    with db.lock:
+        return db.conn.execute(sql, params).fetchall()
+
+
+def technical_catalog_field_has(row: sqlite3.Row, field: str, wanted: str) -> bool:
+    normalized = technical_term_normalized(wanted)
+    return any(
+        technical_term_normalized(part.strip()) == normalized
+        for part in str(row[field] or "").split("|")
+        if part.strip()
+    )
+
+
+def technical_catalog_rank(
+    row: sqlite3.Row,
+    query: str,
+    requirements: list[tuple[str, str]],
+) -> float:
+    parsed = technical_query_interpret(query)
+    flags = parsed["flags"]
+    score = 0.0
+
+    field_map = {
+        "BRAND": "brands",
+        "RESOURCE": "resources",
+        "TECHNOLOGY": "technologies",
+        "SOFTWARE": "software",
+        "MODEL": "models",
+        "EQUIPMENT_CLASS": "equipment_classes",
+    }
+    weights = {
+        "BRAND": 25.0,
+        "RESOURCE": 45.0,
+        "TECHNOLOGY": 40.0,
+        "SOFTWARE": 110.0,
+        "MODEL": 100.0,
+        "EQUIPMENT_CLASS": 70.0,
+    }
+    for term_type, value in requirements:
+        field = field_map.get(term_type)
+        if field and technical_catalog_field_has(row, field, value):
+            score += weights.get(term_type, 10.0)
+
+    name_compact = technical_term_normalized(str(row["file_name"] or ""))
+
+    if flags["wants_software"]:
+        if str(row["software"] or ""):
+            score += 45.0
+        if technical_catalog_field_has(row, "resources", "CPS"):
+            score += 35.0
+        if "KPG" in name_compact:
+            score += 30.0
+
+    if flags["wants_cps"] and technical_catalog_field_has(row, "resources", "CPS"):
+        score += 25.0
+    elif flags["wants_cps"] and str(row["software"] or ""):
+        # Algunos softwares de programación (por ejemplo KPG-D6) no llevan
+        # literalmente "CPS" en el nombre, pero son el software buscado.
+        score += 45.0
+
+    # Para búsquedas CPS genéricas, el paquete principal debe ir antes que
+    # parches, cracks, wideband, analog support o downgrades.
+    if flags["wants_cps"] and (
+        "CPS2" in name_compact
+        or "STANDALONE" in name_compact
+        or "FAMILYCPS" in name_compact
+    ):
+        score += 30.0
+
+    specials = (
+        ("PATCH", flags["patch"], 35.0),
+        ("CRACK", flags["crack"], 20.0),
+        ("DOWNGRADE", flags["downgrade"], 40.0),
+        ("FIRMWARE", flags["firmware"], 15.0),
+        ("RESET", flags["reset"], 40.0),
+    )
+    for resource, requested, penalty in specials:
+        present = technical_catalog_field_has(row, "resources", resource)
+        if present and requested:
+            score += 60.0
+        elif present and not requested:
+            score -= penalty
+
+    if "WIDEBAND" in name_compact or "25KHZ" in name_compact:
+        score += 60.0 if flags["wideband"] else -35.0
+    if "ANALOGSUPPORT" in name_compact:
+        score += 60.0 if flags["analog_support"] else -35.0
+
+    return score
+
+
+TECHNICAL_SEARCH_EXTENSIONS = (".rar", ".zip", ".7z", ".exe")
+
+
+def technical_file_allowed(file_name: str) -> bool:
+    lower = (file_name or "").lower()
+    return any(lower.endswith(ext) for ext in TECHNICAL_SEARCH_EXTENSIONS)
+
+
+def technical_catalog_search_rows(
+    chat_id: int,
+    query: str,
+    limit: int = ARCHIVE_SEARCH_MAX_RESULTS,
+) -> tuple[bool, list[sqlite3.Row]]:
+    """Devuelve (consulta_estructurada, filas).
+
+    Si consulta_estructurada=True, una lista vacía es una respuesta válida y NO
+    se debe rellenar con coincidencias difusas del buscador antiguo.
+    """
+    parsed = technical_query_interpret(query)
+    models = list(parsed["models"])
+    brands = list(parsed["brands"])
+    technologies = list(parsed["technologies"])
+    resources = list(parsed["resources"])
+    equipment_classes = list(parsed["equipment_classes"])
+
+    base: list[tuple[str, str]] = []
+    base.extend(("BRAND", value) for value in brands)
+    base.extend(("TECHNOLOGY", value) for value in technologies)
+    base.extend(("RESOURCE", value) for value in resources)
+    base.extend(("EQUIPMENT_CLASS", value) for value in equipment_classes)
+
+    structured = bool(base or models)
+    if not structured:
+        return False, []
+
+    max_results = max(1, min(12, int(limit)))
+
+    # Varios modelos se resuelven por separado. Así EM200 + PRO5100 no exige
+    # que ambos aparezcan en el mismo nombre de archivo.
+    if models:
+        per_target: list[list[tuple[float, sqlite3.Row]]] = []
+        all_scored: list[tuple[float, sqlite3.Row]] = []
+        for model in models:
+            requirements = list(base)
+            if model.startswith("KPG-"):
+                requirements.append(("SOFTWARE", model))
+            else:
+                requirements.append(("MODEL", model))
+
+            rows = technical_catalog_fetch_exact(chat_id, requirements)
+
+            # Si el usuario pide "CPS" para un MODELO concreto y el nombre
+            # histórico no etiqueta el recurso como CPS (caso típico: KPG-D6
+            # para NX-1300), hacemos un fallback CONTROLADO solo por ese modelo.
+            # No se aplica a búsquedas amplias como "Kenwood DMR CPS".
+            if not rows and ("RESOURCE", "CPS") in requirements:
+                fallback_requirements = [
+                    item for item in requirements
+                    if item != ("RESOURCE", "CPS")
+                ]
+                rows = technical_catalog_fetch_exact(chat_id, fallback_requirements)
+                if rows:
+                    requirements = fallback_requirements
+
+            ranked = [
+                (technical_catalog_rank(row, query, requirements), row)
+                for row in rows
+                if technical_file_allowed(str(row["file_name"] or ""))
+            ]
+            ranked.sort(
+                key=lambda item: (item[0], int(item[1]["message_id"])),
+                reverse=True,
+            )
+            per_target.append(ranked)
+            all_scored.extend(ranked)
+
+        # Cobertura primero: si se pidieron varios modelos, intenta mostrar al
+        # menos la mejor coincidencia de cada uno antes de completar el cupo.
+        selected: list[sqlite3.Row] = []
+        seen_sha: set[str] = set()
+        for ranked in per_target:
+            if not ranked:
+                continue
+            row = ranked[0][1]
+            sha = str(row["sha256"])
+            if sha not in seen_sha:
+                seen_sha.add(sha)
+                selected.append(row)
+
+        all_scored.sort(
+            key=lambda item: (item[0], int(item[1]["message_id"])),
+            reverse=True,
+        )
+        for _score, row in all_scored:
+            if len(selected) >= max_results:
+                break
+            sha = str(row["sha256"])
+            if sha in seen_sha:
+                continue
+            seen_sha.add(sha)
+            selected.append(row)
+        return True, selected[:max_results]
+
+    rows = technical_catalog_fetch_exact(chat_id, base)
+    ranked = [
+        (technical_catalog_rank(row, query, base), row)
+        for row in rows
+        if technical_file_allowed(str(row["file_name"] or ""))
+    ]
+    ranked.sort(
+        key=lambda item: (item[0], int(item[1]["message_id"])),
+        reverse=True,
+    )
+    return True, [row for _, row in ranked[:max_results]]
+
+
+def search_archive_rows(chat_id: int, query: str, limit: int = ARCHIVE_SEARCH_MAX_RESULTS) -> list[sqlite3.Row]:
+    structured, rows = technical_catalog_search_rows(chat_id, query, limit)
+    if structured:
+        return rows
+    return search_archive_rows_legacy(chat_id, query, limit)
+
 
 def human_file_size(size_value: int) -> str:
     size = max(0, int(size_value or 0))
@@ -6059,6 +7032,26 @@ async def handle_duplicate(
                 if unique_id:
                     db.store_unique_file(chat_id, unique_id, message_id)
 
+                # El catálogo técnico es una capa paralela. Se actualiza solo
+                # DESPUÉS de que SHA-256 ya decidió que el archivo es original.
+                try:
+                    technical_catalog_upsert_fingerprint(
+                        chat_id=chat_id,
+                        sha256=sha256,
+                        message_id=message_id,
+                        file_unique_id=unique_id,
+                        file_name=file_name,
+                        file_size=file_size,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "CATALOGO TECNICO: no se pudo indexar %s: %s",
+                        file_name,
+                        exc,
+                    )
+
                 log.info(
                     "HUELLA registrada | archivo=%s | size=%s | digest=%s...",
                     file_name,
@@ -7553,6 +8546,25 @@ async def post_init(application: Application) -> None:
                     chat_id=admin_user_id,
                     menu_button=MenuButtonCommands(),
                 )
+
+    # Reconciliar el catálogo técnico desde file_fingerprints. Es una capa
+    # derivada y paralela; no altera ni recalcula las huellas SHA-256.
+    for catalog_chat_id in sorted(ALLOWED_GROUP_IDS):
+        try:
+            source_count, catalog_count = technical_catalog_sync_group(catalog_chat_id)
+            log.info(
+                "Catálogo técnico sincronizado | chat=%s | fingerprints=%s | catalogo=%s | parser=%s",
+                catalog_chat_id,
+                source_count,
+                catalog_count,
+                TECHNICAL_CATALOG_PARSER_VERSION,
+            )
+        except Exception as exc:
+            log.warning(
+                "Catálogo técnico: fallo sincronizando chat %s: %s",
+                catalog_chat_id,
+                exc,
+            )
 
     log.info(
         "Duplicados: Bot API local + SHA-256 | temporales=%s",
