@@ -66,7 +66,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.18-daily-message-visible"
+VERSION = "2.8.19-multi-model-suffix"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -283,7 +283,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
-TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.0-mototrbo-domain"
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.1-multi-model-suffix"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -3755,6 +3755,22 @@ def technical_catalog_detect_models(file_name: str) -> list[str]:
         numbers = [nx_match.group(1)] + re.findall(r"\d{3,4}", nx_match.group(2))
         for number in numbers:
             add(f"NX-{number}")
+
+    # Modelos Motorola abreviados con una sola familia y varios números.
+    # Ejemplo confirmado: DEM300_400 -> DEM-300 y DEM-400.
+    # Se limita a DEM/DGM para no inferir compatibilidades no confirmadas.
+    for family in ("DEM", "DGM"):
+        family_multi = re.search(
+            rf"\b{family}\s*(\d{{3,4}}[A-Z]?)(?P<tail>(?:\s+\d{{3,4}}[A-Z]?)+)\b",
+            spaced,
+        )
+        if family_multi:
+            add(f"{family}-{family_multi.group(1)}")
+            for number in re.findall(
+                r"\d{3,4}[A-Z]?",
+                family_multi.group("tail"),
+            ):
+                add(f"{family}-{number}")
 
     # Familias Motorola APX.
     if re.search(r"\bAPX\s+N70\b", spaced) or "APXN70" in compact:
