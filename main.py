@@ -24,6 +24,7 @@ import contextlib
 import difflib
 import hashlib
 import io
+import json
 from difflib import SequenceMatcher
 import logging
 import os
@@ -66,7 +67,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.20-humor-control"
+VERSION = "2.8.21-humor-list-editor"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -768,8 +769,8 @@ PECOS_INSULT_RE = re.compile(
 )
 
 BAND_CONVERSION_PANEL_MESSAGES = [
-    "🤠 Pasar un UHF a VHF es casi como pedirle a un árbol que florezca billetes… bonito sería, pero no funciona así, partner. 😂",
-    "🌵 Convertir VHF en UHF por programación sería precioso. Pecos también quisiera convertir cactus en antenas.",
+    "🤠 Pasar un {origen} a {destino} es casi como pedirle a un árbol que florezca billetes… bonito sería, pero no funciona así, partner. 😂",
+    "🌵 Convertir {origen} en {destino} por programación sería precioso. Pecos también quisiera convertir cactus en antenas.",
 ]
 
 SILENCE_MESSAGES = [
@@ -1649,6 +1650,30 @@ class Database:
             self.conn.commit()
         return int(cur.rowcount)
 
+    def update_joke(
+        self,
+        joke_id: int,
+        username: str,
+        probability: int,
+        response: str,
+    ) -> bool:
+        username = username.lstrip("@").strip().casefold()
+        response = response.strip()
+        probability = max(1, min(100, int(probability)))
+        if not username or not response:
+            return False
+        with self.lock:
+            cur = self.conn.execute(
+                """
+                UPDATE user_jokes
+                SET username = ?, probability = ?, response = ?
+                WHERE id = ?
+                """,
+                (username, probability, response, int(joke_id)),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
+
     def add_memory(
         self,
         chat_id: int,
@@ -2304,6 +2329,164 @@ class Database:
 db = Database(DB_PATH)
 
 
+# Repertorios de humor visibles y editables desde /config.
+# Melerix y el saludo especial de leosedf quedan deliberadamente fuera
+# del panel; sus comportamientos existentes no se eliminan.
+HUMOR_POOL_DEFINITIONS: dict[str, tuple[str, list[str], str]] = {
+    "xerax_manual": (
+        "🤖 XeraX — bromas por mención",
+        XERAX_FUN_MESSAGES,
+        "Se usan cuando otro usuario nombra explícitamente a XeraX.",
+    ),
+    "xerax_auto": (
+        "⏱️ XeraX — bromas automáticas",
+        XERAX_AUTO_MESSAGES,
+        "Máximo una por mañana, una por tarde y una por noche cuando XeraX interviene.",
+    ),
+    "advice": (
+        "🤠 Consejos de Pecos",
+        ADVICE_MESSAGES,
+        "Repertorio usado por /consejo.",
+    ),
+    "phrase": (
+        "💬 Frases de Pecos",
+        PHRASE_MESSAGES,
+        "Repertorio usado por /frase.",
+    ),
+    "excuse": (
+        "🌵 Excusas de Pecos",
+        EXCUSE_MESSAGES,
+        "Repertorio usado por /excusa.",
+    ),
+    "forecast": (
+        "🔮 Pronósticos de Pecos",
+        FORECAST_MESSAGES,
+        "Repertorio usado por /pronostico.",
+    ),
+    "duel": (
+        "⚔️ Duelo de Pecos",
+        PECOS_DUEL_MESSAGES,
+        "Respuestas humorísticas cuando una ofensa está dirigida claramente a Pecos. Admite {usuario}.",
+    ),
+    "band": (
+        "📻 Bromas VHF ↔ UHF",
+        BAND_CONVERSION_PANEL_MESSAGES,
+        "Admite {origen} y {destino}; Pecos los reemplaza por VHF/UHF según la consulta.",
+    ),
+    "daily": (
+        "🕘 Saludos diarios en broma",
+        DAILY_FUN_GREETINGS,
+        "Se usan a la hora del mensaje diario cuando Humor diario está activado.",
+    ),
+    "silence": (
+        "🌵 Bromas por silencio",
+        SILENCE_MESSAGES,
+        "Se usan cuando el detector de silencio interviene. Admite {horas}.",
+    ),
+}
+
+
+def humor_pool_setting_key(pool_key: str) -> str:
+    return f"humor_pool:{pool_key}"
+
+
+def humor_pool_exists(pool_key: str) -> bool:
+    return pool_key in HUMOR_POOL_DEFINITIONS
+
+
+def humor_pool_title(pool_key: str) -> str:
+    definition = HUMOR_POOL_DEFINITIONS.get(pool_key)
+    return definition[0] if definition else "🎭 Repertorio"
+
+
+def humor_pool_note(pool_key: str) -> str:
+    definition = HUMOR_POOL_DEFINITIONS.get(pool_key)
+    return definition[2] if definition else ""
+
+
+def get_humor_pool(pool_key: str) -> list[str]:
+    definition = HUMOR_POOL_DEFINITIONS.get(pool_key)
+    if not definition:
+        return []
+
+    defaults = definition[1]
+    raw = db.get_setting(humor_pool_setting_key(pool_key), "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                cleaned = [
+                    str(item).strip()
+                    for item in parsed
+                    if str(item).strip()
+                ]
+                if cleaned:
+                    return cleaned
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logging.warning("Repertorio de humor inválido en settings: %s", pool_key)
+
+    return list(defaults)
+
+
+def save_humor_pool(pool_key: str, items: list[str]) -> None:
+    if not humor_pool_exists(pool_key):
+        raise ValueError("Repertorio de humor desconocido")
+
+    cleaned = [str(item).strip() for item in items if str(item).strip()]
+    if not cleaned:
+        raise ValueError("El repertorio no puede quedar vacío")
+    if len(cleaned) > 150:
+        raise ValueError("El repertorio no puede superar 150 mensajes")
+    if any(len(item) > 3500 for item in cleaned):
+        raise ValueError("Una de las bromas supera 3500 caracteres")
+
+    db.set_setting(
+        humor_pool_setting_key(pool_key),
+        json.dumps(cleaned, ensure_ascii=False),
+    )
+
+
+def reset_humor_pool(pool_key: str) -> None:
+    if not humor_pool_exists(pool_key):
+        return
+    # Cadena vacía = volver a usar los valores definidos en main.py.
+    db.set_setting(humor_pool_setting_key(pool_key), "")
+
+
+def format_humor_pool_list(pool_key: str) -> str:
+    pool = get_humor_pool(pool_key)
+    title = humor_pool_title(pool_key)
+    note = humor_pool_note(pool_key)
+    lines = [f"{title}\n", f"Mensajes: {len(pool)}"]
+    if note:
+        lines.append(note)
+    lines.append("")
+    for index, item in enumerate(pool, start=1):
+        lines.append(f"{index}. {item}")
+    return "\n\n".join(lines)
+
+
+def render_humor_preview(pool_key: str, usuario: str) -> str:
+    pool = get_humor_pool(pool_key)
+    if not pool:
+        return "No hay mensajes disponibles en este repertorio."
+
+    text_value = choose_random(
+        f"panel_humor_{pool_key}",
+        pool,
+        usuario,
+    )
+    if pool_key == "silence":
+        text_value = text_value.replace("{horas}", "8")
+    elif pool_key == "band":
+        text_value = (
+            text_value
+            .replace("{origen}", "VHF")
+            .replace("{destino}", "UHF")
+        )
+    return text_value
+
+
 def is_admin(user_id: int | None) -> bool:
     return bool(user_id and user_id in ADMIN_USER_IDS)
 
@@ -2700,7 +2883,7 @@ def format_hours_value(hours: float) -> str:
 
 
 def build_silence_message(elapsed_hours: float) -> str:
-    template = random.choice(SILENCE_MESSAGES)
+    template = random.choice(get_humor_pool("silence"))
     return template.replace("{horas}", format_hours_value(elapsed_hours))
 
 
@@ -5599,7 +5782,7 @@ def build_daily_panel_text() -> str:
         f"{daily_message}\n\n"
         + (
             f"🎲 Humor diario activo: Pecos elegirá una de "
-            f"{len(DAILY_FUN_GREETINGS)} bromas al azar a la hora indicada."
+            f"{len(get_humor_pool('daily'))} bromas al azar a la hora indicada."
             if fun_enabled
             else "🎲 Humor diario apagado: se enviará exactamente el texto configurado."
         )
@@ -5629,26 +5812,45 @@ def humor_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🤖 XeraX", callback_data="humor:xerax"),
-                InlineKeyboardButton("🎬 Melerix", callback_data="humor:melerix"),
+                InlineKeyboardButton("🤖 XeraX — mención", callback_data="humor:list:xerax_manual"),
+                InlineKeyboardButton("⏱️ XeraX — auto", callback_data="humor:list:xerax_auto"),
             ],
             [
-                InlineKeyboardButton("🤠 Consejo", callback_data="humor:advice"),
-                InlineKeyboardButton("💬 Frase", callback_data="humor:phrase"),
+                InlineKeyboardButton("🤠 Consejos", callback_data="humor:list:advice"),
+                InlineKeyboardButton("💬 Frases", callback_data="humor:list:phrase"),
             ],
             [
-                InlineKeyboardButton("🌵 Excusa", callback_data="humor:excuse"),
-                InlineKeyboardButton("🔮 Pronóstico", callback_data="humor:forecast"),
+                InlineKeyboardButton("🌵 Excusas", callback_data="humor:list:excuse"),
+                InlineKeyboardButton("🔮 Pronósticos", callback_data="humor:list:forecast"),
             ],
             [
-                InlineKeyboardButton("⚔️ Duelo Pecos", callback_data="humor:duel"),
-                InlineKeyboardButton("📻 VHF ↔ UHF", callback_data="humor:band"),
+                InlineKeyboardButton("⚔️ Duelo Pecos", callback_data="humor:list:duel"),
+                InlineKeyboardButton("📻 VHF ↔ UHF", callback_data="humor:list:band"),
             ],
             [
-                InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes"),
-                InlineKeyboardButton("🕘 Saludo diario", callback_data="menu:daily"),
+                InlineKeyboardButton("🕘 Saludos diarios", callback_data="humor:list:daily"),
+                InlineKeyboardButton("🌵 Silencio", callback_data="humor:list:silence"),
             ],
+            [InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
+        ]
+    )
+
+
+def humor_pool_menu(pool_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📋 Ver listado", callback_data=f"humor:list:{pool_key}")],
+            [
+                InlineKeyboardButton("🧪 Probar una", callback_data=f"humor:test:{pool_key}"),
+                InlineKeyboardButton("✏️ Editar por Nº", callback_data=f"humor:edit:{pool_key}"),
+            ],
+            [
+                InlineKeyboardButton("➕ Agregar", callback_data=f"humor:add:{pool_key}"),
+                InlineKeyboardButton("➖ Eliminar por Nº", callback_data=f"humor:remove:{pool_key}"),
+            ],
+            [InlineKeyboardButton("♻️ Restaurar originales", callback_data=f"humor:reset:{pool_key}")],
+            [InlineKeyboardButton("⬅️ Volver a humor", callback_data="menu:humor")],
         ]
     )
 
@@ -5660,7 +5862,10 @@ def jokes_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📋 Ver bromas", callback_data="jokes:list"),
                 InlineKeyboardButton("➕ Agregar", callback_data="jokes:add"),
             ],
-            [InlineKeyboardButton("➖ Eliminar por ID", callback_data="jokes:remove")],
+            [
+                InlineKeyboardButton("✏️ Editar por ID", callback_data="jokes:edit"),
+                InlineKeyboardButton("➖ Eliminar por ID", callback_data="jokes:remove"),
+            ],
             [InlineKeyboardButton("⬅️ Volver a humor", callback_data="menu:humor")],
         ]
     )
@@ -6103,7 +6308,7 @@ async def command_advice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_clean_command_text(
             message,
             context,
-            random.choice(ADVICE_MESSAGES),
+            random.choice(get_humor_pool("advice")),
         )
 
 
@@ -6113,7 +6318,7 @@ async def command_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_clean_command_text(
             message,
             context,
-            random.choice(PHRASE_MESSAGES),
+            random.choice(get_humor_pool("phrase")),
         )
 
 
@@ -6123,7 +6328,7 @@ async def command_excuse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await send_clean_command_text(
             message,
             context,
-            random.choice(EXCUSE_MESSAGES),
+            random.choice(get_humor_pool("excuse")),
         )
 
 
@@ -6133,7 +6338,7 @@ async def command_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await send_clean_command_text(
             message,
             context,
-            random.choice(FORECAST_MESSAGES),
+            random.choice(get_humor_pool("forecast")),
         )
 
 
@@ -6201,6 +6406,119 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text(
             admin_archive_search_text(text, rows),
             reply_markup=main_menu(),
+        )
+        return True
+
+    if action.startswith("humor:edit:"):
+        pool_key = action.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            PENDING_ADMIN_ACTION.pop(user.id, None)
+            await message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return True
+
+        parts = [part.strip() for part in text.split("|", 1)]
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1]:
+            await message.reply_text(
+                "Formato inválido. Usa:\n"
+                "NÚMERO | nuevo texto\n\n"
+                "Ejemplo:\n2 | 🤠 Nueva broma de Pecos.\n\n"
+                "Usa /cancel para cancelar."
+            )
+            return True
+
+        number = int(parts[0])
+        pool = get_humor_pool(pool_key)
+        if not (1 <= number <= len(pool)):
+            await message.reply_text(
+                f"El número debe estar entre 1 y {len(pool)}. Intenta nuevamente o usa /cancel."
+            )
+            return True
+
+        pool[number - 1] = parts[1]
+        try:
+            save_humor_pool(pool_key, pool)
+        except ValueError as exc:
+            await message.reply_text(f"No pude guardar: {exc}")
+            return True
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(
+            f"ADMIN: editó mensaje #{number} del repertorio {pool_key}."
+        )
+        await message.reply_text(
+            f"✅ Mensaje #{number} actualizado en {humor_pool_title(pool_key)}.",
+            reply_markup=humor_pool_menu(pool_key),
+        )
+        return True
+
+    if action.startswith("humor:add:"):
+        pool_key = action.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            PENDING_ADMIN_ACTION.pop(user.id, None)
+            await message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return True
+
+        new_items = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
+        if not new_items:
+            await message.reply_text("No encontré mensajes válidos. Intenta nuevamente o usa /cancel.")
+            return True
+
+        pool = get_humor_pool(pool_key)
+        pool.extend(new_items)
+        try:
+            save_humor_pool(pool_key, pool)
+        except ValueError as exc:
+            await message.reply_text(f"No pude guardar: {exc}")
+            return True
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(
+            f"ADMIN: agregó {len(new_items)} mensaje(s) al repertorio {pool_key}."
+        )
+        await message.reply_text(
+            f"✅ Se agregaron {len(new_items)} mensaje(s). Total actual: {len(pool)}.",
+            reply_markup=humor_pool_menu(pool_key),
+        )
+        return True
+
+    if action.startswith("humor:remove:"):
+        pool_key = action.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            PENDING_ADMIN_ACTION.pop(user.id, None)
+            await message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return True
+
+        numbers = sorted(
+            {
+                int(token)
+                for token in re.split(r"[,;\s]+", text)
+                if token.strip().isdigit()
+            },
+            reverse=True,
+        )
+        pool = get_humor_pool(pool_key)
+        valid = [number for number in numbers if 1 <= number <= len(pool)]
+        if not valid:
+            await message.reply_text(
+                f"Indica uno o más números entre 1 y {len(pool)}. Ejemplo: 2, 5\n\nUsa /cancel para cancelar."
+            )
+            return True
+        if len(valid) >= len(pool):
+            await message.reply_text(
+                "No puedo dejar el repertorio vacío. Conserva al menos un mensaje."
+            )
+            return True
+
+        for number in valid:
+            pool.pop(number - 1)
+        save_humor_pool(pool_key, pool)
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(
+            f"ADMIN: eliminó {len(valid)} mensaje(s) del repertorio {pool_key}."
+        )
+        await message.reply_text(
+            f"✅ Se eliminaron {len(valid)} mensaje(s). Total actual: {len(pool)}.",
+            reply_markup=humor_pool_menu(pool_key),
         )
         return True
 
@@ -6292,6 +6610,47 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             result += f"\n⚠️ {len(errors)} línea(s) no tenían el formato correcto."
 
         await message.reply_text(result, reply_markup=jokes_menu())
+        return True
+
+    if action == "jokes:edit":
+        parts = [part.strip() for part in text.split("|", 3)]
+        if len(parts) != 4 or not parts[0].isdigit():
+            await message.reply_text(
+                "Formato inválido. Usa:\n"
+                "ID | @usuario | probabilidad | respuesta\n\n"
+                "Ejemplo:\n"
+                "3 | @juan | 35 | 🤠 Nueva respuesta para Juan.\n\n"
+                "Usa /cancel para cancelar."
+            )
+            return True
+
+        joke_id = int(parts[0])
+        username = parts[1].lstrip("@").strip()
+        try:
+            probability = int(parts[2])
+        except ValueError:
+            probability = 0
+        response = parts[3].strip()
+
+        if not username or not response or not (1 <= probability <= 100):
+            await message.reply_text(
+                "Revisa usuario, probabilidad (1–100) y respuesta. Usa /cancel para cancelar."
+            )
+            return True
+
+        updated = db.update_joke(joke_id, username, probability, response)
+        if not updated:
+            await message.reply_text(
+                "No encontré una broma con ese ID. Revisa «Ver bromas» e intenta nuevamente."
+            )
+            return True
+
+        PENDING_ADMIN_ACTION.pop(user.id, None)
+        db.add_history(f"ADMIN: editó broma interna ID {joke_id}.")
+        await message.reply_text(
+            f"✅ Broma interna ID {joke_id} actualizada.",
+            reply_markup=jokes_menu(),
+        )
         return True
 
     if action == "jokes:remove":
@@ -6613,48 +6972,113 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if data == "humor:xerax":
+    if data.startswith("humor:list:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+
+        await send_long_text(
+            chat.id,
+            format_humor_pool_list(pool_key),
+            context,
+        )
         await query.message.reply_text(
-            choose_random("panel_xerax", XERAX_FUN_MESSAGES, query.from_user.first_name or "admin"),
-            reply_markup=humor_menu(),
+            f"Opciones de {humor_pool_title(pool_key)}:",
+            reply_markup=humor_pool_menu(pool_key),
         )
         return
 
-    if data == "humor:melerix":
+    if data.startswith("humor:test:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
         await query.message.reply_text(
-            choose_random("panel_melerix", MELERIX_FUN_MESSAGES, query.from_user.first_name or "admin"),
-            reply_markup=humor_menu(),
+            render_humor_preview(
+                pool_key,
+                query.from_user.first_name or "partner",
+            ),
+            reply_markup=humor_pool_menu(pool_key),
         )
         return
 
-    if data == "humor:advice":
-        await query.message.reply_text(random.choice(ADVICE_MESSAGES), reply_markup=humor_menu())
-        return
-
-    if data == "humor:phrase":
-        await query.message.reply_text(random.choice(PHRASE_MESSAGES), reply_markup=humor_menu())
-        return
-
-    if data == "humor:excuse":
-        await query.message.reply_text(random.choice(EXCUSE_MESSAGES), reply_markup=humor_menu())
-        return
-
-    if data == "humor:forecast":
-        await query.message.reply_text(random.choice(FORECAST_MESSAGES), reply_markup=humor_menu())
-        return
-
-    if data == "humor:duel":
-        template = random.choice(PECOS_DUEL_MESSAGES)
+    if data.startswith("humor:edit:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+        PENDING_ADMIN_ACTION[user_id] = f"humor:edit:{pool_key}"
         await query.message.reply_text(
-            template.format(usuario=query.from_user.first_name or "partner"),
-            reply_markup=humor_menu(),
+            f"✏️ Editar {humor_pool_title(pool_key)}\n\n"
+            "Envíame:\n"
+            "NÚMERO | nuevo texto\n\n"
+            "Ejemplo:\n"
+            "2 | 🤠 Esta es la nueva broma de Pecos.\n\n"
+            "El número corresponde al listado que acabas de ver.\n"
+            "Usa /cancel para cancelar."
         )
         return
 
-    if data == "humor:band":
+    if data.startswith("humor:add:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+        PENDING_ADMIN_ACTION[user_id] = f"humor:add:{pool_key}"
         await query.message.reply_text(
-            random.choice(BAND_CONVERSION_PANEL_MESSAGES),
-            reply_markup=humor_menu(),
+            f"➕ Agregar a {humor_pool_title(pool_key)}\n\n"
+            "Envíame una o varias bromas, una por línea.\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data.startswith("humor:remove:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+        PENDING_ADMIN_ACTION[user_id] = f"humor:remove:{pool_key}"
+        await query.message.reply_text(
+            f"➖ Eliminar de {humor_pool_title(pool_key)}\n\n"
+            "Envíame los números que quieras eliminar.\n"
+            "Ejemplo: 2, 5, 7\n\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data.startswith("humor:reset:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Sí, restaurar", callback_data=f"humor:reset_yes:{pool_key}"),
+                    InlineKeyboardButton("❌ No", callback_data=f"humor:list:{pool_key}"),
+                ]
+            ]
+        )
+        await safe_edit(
+            query,
+            f"⚠️ ¿Restaurar los mensajes originales de {humor_pool_title(pool_key)}?\n\n"
+            "Se perderán las ediciones hechas desde el panel para este repertorio.",
+            markup,
+        )
+        return
+
+    if data.startswith("humor:reset_yes:"):
+        pool_key = data.split(":", 2)[2]
+        if not humor_pool_exists(pool_key):
+            await query.message.reply_text("Repertorio desconocido.", reply_markup=humor_menu())
+            return
+        reset_humor_pool(pool_key)
+        db.add_history(f"ADMIN: restauró repertorio de humor {pool_key}.")
+        await safe_edit(
+            query,
+            f"✅ {humor_pool_title(pool_key)} restaurado a sus mensajes originales.",
+            humor_pool_menu(pool_key),
         )
         return
 
@@ -6764,6 +7188,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Ejemplo:\n"
             "@juan | 35 | 👀 Cada vez que nombran a Juan, Pecos sospecha algo.\n"
             "@pedro | 20 | 🤠 Pedro apareció en la conversación. Esto se pone interesante.\n\n"
+            "Usa /cancel para cancelar."
+        )
+        return
+
+    if data == "jokes:edit":
+        PENDING_ADMIN_ACTION[user_id] = "jokes:edit"
+        await query.message.reply_text(
+            "✏️ Editar broma interna por ID\n\n"
+            "Formato:\n"
+            "ID | @usuario | probabilidad | respuesta\n\n"
+            "Ejemplo:\n"
+            "3 | @juan | 35 | 🤠 Nueva respuesta de Pecos.\n\n"
+            "Puedes consultar los ID con «Ver bromas».\n"
             "Usa /cancel para cancelar."
         )
         return
@@ -7845,17 +8282,24 @@ async def handle_band_conversion_joke(message: Message) -> bool:
         return False
 
     if vhf_to_uhf:
-        joke = (
-            "🤠 Pasar un VHF a UHF es casi como pedirle a un árbol que "
-            "florezca billetes… bonito sería, pero no funciona así, partner. 😂"
-        )
+        origin = "VHF"
+        destination = "UHF"
         direction = "VHF → UHF"
     else:
-        joke = (
-            "🤠 Pasar un UHF a VHF es casi como pedirle a un árbol que "
-            "florezca billetes… bonito sería, pero no funciona así, partner. 😂"
-        )
+        origin = "UHF"
+        destination = "VHF"
         direction = "UHF → VHF"
+
+    joke = choose_random(
+        "band_conversion",
+        get_humor_pool("band"),
+        display_name(message),
+    )
+    joke = (
+        joke
+        .replace("{origen}", origin)
+        .replace("{destino}", destination)
+    )
 
     await message.reply_text(
         joke
@@ -7912,7 +8356,7 @@ async def handle_xerax_auto_presence(message: Message) -> bool:
     await message.reply_text(
         choose_random(
             f"xerax_auto_{period}",
-            XERAX_AUTO_MESSAGES,
+            get_humor_pool("xerax_auto"),
             display_name(message),
         )
     )
@@ -7971,7 +8415,7 @@ async def handle_pecos_insult_duel(
 
     template = choose_random(
         "pecos_duel",
-        PECOS_DUEL_MESSAGES,
+        get_humor_pool("duel"),
         display_name(message),
     )
     await message.reply_text(
@@ -8081,7 +8525,7 @@ async def handle_xerax_fun(message: Message) -> bool:
     await message.reply_text(
         choose_random(
             "xerax_fun",
-            XERAX_FUN_MESSAGES,
+            get_humor_pool("xerax_manual"),
             display_name(message),
         )
     )
@@ -8933,7 +9377,7 @@ async def daily_loop(application: Application) -> None:
                     if db.is_true("daily_fun_enabled"):
                         text = choose_random(
                             "daily_fun_greeting",
-                            DAILY_FUN_GREETINGS,
+                            get_humor_pool("daily"),
                             today,
                         )
                     else:
