@@ -67,7 +67,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.23-recurring-silence"
+VERSION = "2.8.24-whole-hours-daily-random"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1208,6 +1208,30 @@ class Database:
                     "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                     (key, value),
                 )
+
+            # Migración de 2.8.24:
+            # activar una sola vez el modo de saludo diario aleatorio.
+            # Si luego el administrador lo apaga, el marcador evita
+            # reactivarlo en cada reinicio.
+            migration_key = "migration_daily_fun_random_2_8_24"
+            migrated = self.conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (migration_key,),
+            ).fetchone()
+
+            if migrated is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO settings(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    ("daily_fun_enabled", "1"),
+                )
+                self.conn.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?)",
+                    (migration_key, "1"),
+                )
+
             self.conn.commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -3143,9 +3167,9 @@ def choose_random(category: str, choices: list[str], usuario: str) -> str:
 
 
 def format_hours_value(hours: float) -> str:
-    if hours < 10:
-        return f"{hours:.1f}"
-    return str(int(round(hours)))
+    # Mostrar únicamente horas completas transcurridas.
+    # Ej.: 8.1 h -> "8", 2.9 h -> "2".
+    return str(max(0, int(hours)))
 
 
 def build_silence_message(elapsed_hours: float) -> str:
@@ -6042,37 +6066,40 @@ def build_daily_panel_text() -> str:
     daily_time = db.get_setting("daily_time", "09:00")
     daily_message = db.get_setting("daily_message", "").strip()
     fun_enabled = db.is_true("daily_fun_enabled")
+    daily_pool = get_humor_pool("daily")
 
     if not daily_message:
         daily_message = "(sin texto configurado)"
 
-    max_preview = 2900
+    max_preview = 2600
     if len(daily_message) > max_preview:
         daily_message = (
             daily_message[:max_preview].rstrip()
             + "\n… (texto recortado en el panel)"
         )
 
-    mode = (
-        "🎲 Saludo en broma de Pecos"
-        if fun_enabled
-        else "📝 Texto configurado"
-    )
+    if fun_enabled:
+        return (
+            "🕘 Mensaje diario\n\n"
+            f"Estado: {status}\n"
+            f"Hora: {daily_time}\n"
+            f"Zona: {TIMEZONE_NAME}\n"
+            "Modo: 🎲 Saludo aleatorio de Pecos\n\n"
+            f"🎲 Pecos elegirá al azar 1 de {len(daily_pool)} saludos "
+            "cada día a la hora indicada.\n\n"
+            "📝 Texto fijo guardado (solo se usa si apagas el humor diario):\n"
+            f"{daily_message}"
+        )
 
     return (
         "🕘 Mensaje diario\n\n"
         f"Estado: {status}\n"
         f"Hora: {daily_time}\n"
         f"Zona: {TIMEZONE_NAME}\n"
-        f"Modo: {mode}\n\n"
-        "📝 Texto configurado:\n"
+        "Modo: 📝 Texto configurado\n\n"
+        "📝 Mensaje que se enviará:\n"
         f"{daily_message}\n\n"
-        + (
-            f"🎲 Humor diario activo: Pecos elegirá una de "
-            f"{len(get_humor_pool('daily'))} bromas al azar a la hora indicada."
-            if fun_enabled
-            else "🎲 Humor diario apagado: se enviará exactamente el texto configurado."
-        )
+        "🎲 Humor diario apagado."
     )
 
 
