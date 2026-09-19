@@ -67,7 +67,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.24-whole-hours-daily-random"
+VERSION = "2.8.25-daily-always-random"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1192,11 +1192,10 @@ class Database:
 
     def _ensure_defaults(self) -> None:
         defaults = {
-            "daily_enabled": "0",
+            "daily_enabled": "1",
             "daily_time": "09:00",
-            "daily_message": "Buen día. Recuerda mantener una convivencia respetuosa en el grupo.",
-            "daily_fun_enabled": "0",
-            # Desactivado por defecto en producción para evitar sorpresas.
+            "daily_message": "",
+            "daily_fun_enabled": "1",
             "duplicates_enabled": "0",
             "last_daily_sent_date": "",
             "silence_enabled": "1",
@@ -1209,27 +1208,21 @@ class Database:
                     (key, value),
                 )
 
-            # Migración de 2.8.24:
-            # activar una sola vez el modo de saludo diario aleatorio.
-            # Si luego el administrador lo apaga, el marcador evita
-            # reactivarlo en cada reinicio.
-            migration_key = "migration_daily_fun_random_2_8_24"
-            migrated = self.conn.execute(
-                "SELECT value FROM settings WHERE key = ?",
-                (migration_key,),
-            ).fetchone()
-
-            if migrated is None:
+            # Invariante desde 2.8.25:
+            # el mensaje diario está SIEMPRE activo y SIEMPRE usa el
+            # repertorio aleatorio de saludos. El antiguo texto fijo se
+            # borra de settings para que no pueda volver a enviarse.
+            for key, value in (
+                ("daily_enabled", "1"),
+                ("daily_fun_enabled", "1"),
+                ("daily_message", ""),
+            ):
                 self.conn.execute(
                     """
                     INSERT INTO settings(key, value) VALUES(?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
-                    ("daily_fun_enabled", "1"),
-                )
-                self.conn.execute(
-                    "INSERT INTO settings(key, value) VALUES(?, ?)",
-                    (migration_key, "1"),
+                    (key, value),
                 )
 
             self.conn.commit()
@@ -2581,7 +2574,7 @@ HUMOR_POOL_DEFINITIONS: dict[str, tuple[str, list[str], str]] = {
     "daily": (
         "🕘 Saludos diarios en broma",
         DAILY_FUN_GREETINGS,
-        "Se usan a la hora del mensaje diario cuando Humor diario está activado.",
+        "Se usan siempre a la hora configurada. Pecos elige uno al azar cada día.",
     ),
     "silence": (
         "🌵 Bromas por silencio",
@@ -6062,59 +6055,28 @@ def qa_menu() -> InlineKeyboardMarkup:
 
 
 def build_daily_panel_text() -> str:
-    status = "ACTIVO" if db.is_true("daily_enabled") else "DESACTIVADO"
     daily_time = db.get_setting("daily_time", "09:00")
-    daily_message = db.get_setting("daily_message", "").strip()
-    fun_enabled = db.is_true("daily_fun_enabled")
     daily_pool = get_humor_pool("daily")
-
-    if not daily_message:
-        daily_message = "(sin texto configurado)"
-
-    max_preview = 2600
-    if len(daily_message) > max_preview:
-        daily_message = (
-            daily_message[:max_preview].rstrip()
-            + "\n… (texto recortado en el panel)"
-        )
-
-    if fun_enabled:
-        return (
-            "🕘 Mensaje diario\n\n"
-            f"Estado: {status}\n"
-            f"Hora: {daily_time}\n"
-            f"Zona: {TIMEZONE_NAME}\n"
-            "Modo: 🎲 Saludo aleatorio de Pecos\n\n"
-            f"🎲 Pecos elegirá al azar 1 de {len(daily_pool)} saludos "
-            "cada día a la hora indicada.\n\n"
-            "📝 Texto fijo guardado (solo se usa si apagas el humor diario):\n"
-            f"{daily_message}"
-        )
 
     return (
         "🕘 Mensaje diario\n\n"
-        f"Estado: {status}\n"
+        "Estado: ✅ SIEMPRE ACTIVO\n"
         f"Hora: {daily_time}\n"
         f"Zona: {TIMEZONE_NAME}\n"
-        "Modo: 📝 Texto configurado\n\n"
-        "📝 Mensaje que se enviará:\n"
-        f"{daily_message}\n\n"
-        "🎲 Humor diario apagado."
+        "Modo: 🎲 Saludo aleatorio de Pecos\n\n"
+        f"Cada día Pecos elegirá al azar 1 de {len(daily_pool)} saludos "
+        "del repertorio configurado.\n\n"
+        "ℹ️ El mensaje diario no se puede desactivar desde el panel.\n"
+        "ℹ️ El antiguo texto fijo ya no se utiliza."
     )
 
 
 def daily_menu() -> InlineKeyboardMarkup:
-    enabled = db.is_true("daily_enabled")
-    fun_enabled = db.is_true("daily_fun_enabled")
-    toggle_text = "🔴 Desactivar" if enabled else "🟢 Activar"
-    fun_text = "🎲 Humor diario: ON" if fun_enabled else "🎲 Humor diario: OFF"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(toggle_text, callback_data="daily:toggle")],
-            [InlineKeyboardButton(fun_text, callback_data="daily:fun")],
             [
                 InlineKeyboardButton("🕒 Cambiar hora", callback_data="daily:time"),
-                InlineKeyboardButton("✏️ Cambiar texto", callback_data="daily:text"),
+                InlineKeyboardButton("✏️ Editar saludos", callback_data="humor:list:daily"),
             ],
             [InlineKeyboardButton("👁️ Ver configuración", callback_data="daily:view")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
@@ -7754,23 +7716,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if data == "daily:toggle":
-        enabled = not db.is_true("daily_enabled")
-        db.set_setting("daily_enabled", "1" if enabled else "0")
-        db.add_history(f"ADMIN: mensaje diario {'activado' if enabled else 'desactivado'}.")
-        await safe_edit(
-            query,
-            build_daily_panel_text(),
-            daily_menu(),
-        )
-        return
-
-    if data == "daily:fun":
-        enabled = not db.is_true("daily_fun_enabled")
-        db.set_setting("daily_fun_enabled", "1" if enabled else "0")
-        db.add_history(
-            f"ADMIN: humor del mensaje diario {'activado' if enabled else 'desactivado'}."
-        )
+    if data in ("daily:toggle", "daily:fun"):
+        # Compatibilidad con botones de mensajes antiguos:
+        # desde 2.8.25 el diario es siempre activo y aleatorio.
+        db.set_setting("daily_enabled", "1")
+        db.set_setting("daily_fun_enabled", "1")
+        db.set_setting("daily_message", "")
         await safe_edit(
             query,
             build_daily_panel_text(),
@@ -7786,9 +7737,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "daily:text":
-        PENDING_ADMIN_ACTION[user_id] = "daily:text"
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        db.set_setting("daily_message", "")
         await query.message.reply_text(
-            "✏️ Envíame el nuevo texto del mensaje diario.\n\nUsa /cancel para cancelar."
+            "🕘 El mensaje diario ya no usa texto fijo.\n\n"
+            "Edita el repertorio desde «Saludos diarios».",
+            reply_markup=daily_menu(),
         )
         return
 
@@ -7808,8 +7762,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Administradores configurados: {len(ADMIN_USER_IDS)}\n"
             f"Palabras/frases restringidas: {len(db.list_terms())}\n"
             f"Grupos conocidos: {len(groups)}\n"
-            f"Mensaje diario: {'Activo' if db.is_true('daily_enabled') else 'Desactivado'}\n"
-            f"Humor diario: {'Activo' if db.is_true('daily_fun_enabled') else 'Desactivado'}\n"
+            "Mensaje diario: SIEMPRE ACTIVO\n"
+            "Modo diario: Saludo aleatorio de Pecos\n"
             f"Hora diaria: {db.get_setting('daily_time')} ({TIMEZONE_NAME})\n"
             f"Bot API: {'LOCAL integrada (--local)' if LOCAL_BOT_API else 'PÚBLICA'}\n"
             f"Archivos de hash: temporal ({TELEGRAM_FILES_DIR})\n"
@@ -9906,40 +9860,40 @@ async def daily_loop(application: Application) -> None:
             now = datetime.now(BOT_TZ)
             await check_group_silence(application)
 
-            if db.is_true("daily_enabled"):
-                daily_time = db.get_setting("daily_time", "09:00")
-                today = now.strftime("%Y-%m-%d")
-                last_sent = db.get_setting("last_daily_sent_date", "")
+            daily_time = db.get_setting("daily_time", "09:00")
+            today = now.strftime("%Y-%m-%d")
+            last_sent = db.get_setting("last_daily_sent_date", "")
 
-                if now.strftime("%H:%M") == daily_time and last_sent != today:
-                    if db.is_true("daily_fun_enabled"):
-                        text = choose_random(
-                            "daily_fun_greeting",
-                            get_humor_pool("daily"),
-                            today,
+            if now.strftime("%H:%M") == daily_time and last_sent != today:
+                # Desde 2.8.25 el mensaje diario SIEMPRE usa un saludo
+                # aleatorio del repertorio editable "daily".
+                text = choose_random(
+                    "daily_fun_greeting",
+                    get_humor_pool("daily"),
+                    today,
+                )
+                groups = [
+                    row for row in db.list_groups()
+                    if int(row["chat_id"]) in ALLOWED_GROUP_IDS
+                ]
+
+                sent = 0
+                for row in groups:
+                    try:
+                        await application.bot.send_message(
+                            chat_id=int(row["chat_id"]),
+                            text=text,
                         )
-                    else:
-                        text = db.get_setting("daily_message")
-                    groups = [
-                        row for row in db.list_groups()
-                        if int(row["chat_id"]) in ALLOWED_GROUP_IDS
-                    ]
+                        sent += 1
+                    except Forbidden:
+                        log.warning("Sin acceso al grupo %s", row["chat_id"])
+                    except TelegramError as exc:
+                        log.warning("No se pudo enviar mensaje diario a %s: %s", row["chat_id"], exc)
 
-                    sent = 0
-                    for row in groups:
-                        try:
-                            await application.bot.send_message(
-                                chat_id=int(row["chat_id"]),
-                                text=text,
-                            )
-                            sent += 1
-                        except Forbidden:
-                            log.warning("Sin acceso al grupo %s", row["chat_id"])
-                        except TelegramError as exc:
-                            log.warning("No se pudo enviar mensaje diario a %s: %s", row["chat_id"], exc)
-
-                    db.set_setting("last_daily_sent_date", today)
-                    db.add_history(f"MENSAJE DIARIO enviado a {sent} grupo(s).")
+                db.set_setting("last_daily_sent_date", today)
+                db.add_history(
+                    f"MENSAJE DIARIO ALEATORIO enviado a {sent} grupo(s)."
+                )
 
         except asyncio.CancelledError:
             raise
