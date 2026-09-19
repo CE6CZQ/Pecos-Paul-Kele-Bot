@@ -20,6 +20,7 @@ Variables de entorno:
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
 import difflib
 import hashlib
@@ -27,6 +28,7 @@ import io
 import json
 from difflib import SequenceMatcher
 import logging
+import math
 import os
 import random
 import re
@@ -67,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.25-daily-always-random"
+VERSION = "2.8.26-safe-math-daily-limit"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -575,6 +577,26 @@ PECOS_QUESTION_MESSAGES = [
     "🌵 Pecos no tiene todas las respuestas, pero sí una sospecha bastante elegante.",
     "😎 Interesante. Déjame ponerme el sombrero de pensar.",
 ]
+
+MATH_DAILY_LIMIT_MESSAGES = [
+    "🤠 Ya dejé claro que sé matemáticas, {usuario}. Esto sigue siendo un grupo de radios, no una clase de álgebra.",
+    "🧮 Una cuenta por día te hice, {usuario}. La segunda ya parece abuso de confianza, partner.",
+    "🌵 Pecos sabe sumar, restar y multiplicar… pero también sabe cuándo lo están agarrando de calculadora, {usuario}.",
+    "📻 Matemática aprobada, {usuario}. Ahora volvamos a los radios antes de que aparezcan integrales.",
+    "😂 Una cuenta por cabeza y por día, {usuario}. Para la segunda saca la calculadora del teléfono.",
+    "🤖 Resultado matemático del día ya entregado, {usuario}. Servicio de calculadora suspendido por sobreexplotación.",
+    "📡 Pecos domina los números, {usuario}, pero este grupo domina los radios. No confundamos las especialidades.",
+    "🤠 Ya hice mi demostración matemática de hoy, {usuario}. Ahora tráeme un CPS, un firmware o una falla interesante.",
+    "🌵 Pecos no se niega porque no sepa, {usuario}. Se niega porque ya te gustó demasiado el servicio.",
+    "🧮 Ya quedó claro que sé calcular, {usuario}. Si sigo, mañana me van a pedir raíces, matrices y la hipoteca.",
+]
+
+MATH_DAILY_EVENT_KEY = "math_calculation"
+MATH_MAX_EXPRESSION_LENGTH = 120
+MATH_MAX_AST_NODES = 50
+MATH_MAX_ABS_LITERAL = 1_000_000_000_000
+MATH_MAX_ABS_EXPONENT = 100
+MATH_MAX_ABS_RESULT = 1e100
 
 ADVICE_MESSAGES = [
     "🤠 Consejo de Pecos: si vas a equivocarte, que por lo menos sea con estilo.",
@@ -8982,6 +9004,228 @@ async def handle_xerax_fun(message: Message) -> bool:
     return True
 
 
+class SafeMathError(ValueError):
+    pass
+
+
+def _math_candidate_text(text_value: str) -> tuple[str | None, str | None]:
+    """Extrae una expresión aritmética solo cuando la intención es clara."""
+    raw = (text_value or "").strip()
+    if not raw:
+        return None, None
+
+    normalized = normalize_intent(raw).strip()
+    directed_to_pecos = text_mentions_pecos(raw)
+    explicit_math = bool(
+        re.search(
+            r"\b(?:cuanto\s+es|calcula|calcular|resuelve|resolver|resultado\s+de)\b",
+            normalized,
+        )
+    )
+
+    if not (directed_to_pecos or explicit_math):
+        return None, None
+
+    # Caso natural de porcentaje: "15% de 800".
+    percent_source = normalized
+    percent_source = re.sub(r"(?<![a-z0-9_])(?:pecos|peco)(?![a-z0-9_])", " ", percent_source)
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            percent_source = re.sub(
+                rf"(?<![a-z0-9_])@?{re.escape(alias_norm)}(?![a-z0-9_])",
+                " ",
+                percent_source,
+            )
+    percent_source = re.sub(
+        r"\b(?:dime\s+)?(?:cuanto\s+es|calcula|calcular|resuelve|resolver|resultado\s+de)\b",
+        " ",
+        percent_source,
+    )
+    percent_source = re.sub(r"\s+", " ", percent_source).strip(" ?¿!¡=.")
+
+    pm = re.fullmatch(
+        r"([+-]?\d+(?:[.,]\d+)?)\s*%\s*(?:de|of)\s*([+-]?\d+(?:[.,]\d+)?)",
+        percent_source,
+        re.IGNORECASE,
+    )
+    if pm:
+        left = pm.group(1).replace(",", ".")
+        right = pm.group(2).replace(",", ".")
+        return f"(({left})/100)*({right})", percent_source
+
+    candidate = raw
+    # Quitar username del bot y los vocativos Pecos/Peco sin tocar operadores.
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        candidate = re.sub(
+            rf"(?<![\w])@?{re.escape(alias)}(?![\w])",
+            " ",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+    candidate = re.sub(r"(?<![\w])(?:pecos|peco)(?![\w])", " ", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(
+        r"^\s*(?:dime\s+)?(?:cu[aá]nto\s+es|calcula|calcular|resuelve|resolver|resultado\s+de)\s*[:=,]?\s*",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = candidate.strip(" \t\r\n?¿!¡=.;:")
+
+    # x/X entre números se interpreta como multiplicación.
+    candidate = re.sub(r"(?<=\d)\s*[xX]\s*(?=[\d(+-])", "*", candidate)
+    candidate = candidate.replace("×", "*").replace("÷", "/").replace("−", "-")
+    candidate = re.sub(r"(?<=\d),(?=\d)", ".", candidate)
+
+    if not candidate or len(candidate) > MATH_MAX_EXPRESSION_LENGTH:
+        return None, None
+
+    # Debe tener por lo menos un operador real; un número suelto no activa Pecos.
+    if not re.search(r"[+\-*/^]", candidate):
+        return None, None
+
+    # Solo caracteres aritméticos. % queda reservado a "% de".
+    if not re.fullmatch(r"[0-9.\s+\-*/^()]+", candidate):
+        return None, None
+
+    return candidate.replace("^", "**"), candidate
+
+
+def _safe_math_eval(expression: str) -> float | int:
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise SafeMathError("expresión inválida") from exc
+
+    nodes = list(ast.walk(tree))
+    if len(nodes) > MATH_MAX_AST_NODES:
+        raise SafeMathError("expresión demasiado compleja")
+
+    allowed_binops = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)
+    allowed_unary = (ast.UAdd, ast.USub)
+
+    def visit(node):
+        if isinstance(node, ast.Expression):
+            return visit(node.body)
+
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise SafeMathError("solo se permiten números")
+            value = node.value
+            if not math.isfinite(float(value)) or abs(float(value)) > MATH_MAX_ABS_LITERAL:
+                raise SafeMathError("número fuera de rango")
+            return value
+
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, allowed_unary):
+            value = visit(node.operand)
+            return +value if isinstance(node.op, ast.UAdd) else -value
+
+        if isinstance(node, ast.BinOp) and isinstance(node.op, allowed_binops):
+            left = visit(node.left)
+            right = visit(node.right)
+
+            if isinstance(node.op, ast.Add):
+                result = left + right
+            elif isinstance(node.op, ast.Sub):
+                result = left - right
+            elif isinstance(node.op, ast.Mult):
+                result = left * right
+            elif isinstance(node.op, ast.Div):
+                if right == 0:
+                    raise SafeMathError("no se puede dividir por cero")
+                result = left / right
+            else:  # Pow
+                if abs(float(right)) > MATH_MAX_ABS_EXPONENT:
+                    raise SafeMathError("exponente demasiado grande")
+                # Evitar resultados complejos, por ejemplo (-4)^0.5.
+                if left < 0 and not float(right).is_integer():
+                    raise SafeMathError("el resultado no es un número real")
+                try:
+                    result = left ** right
+                except (OverflowError, ValueError) as exc:
+                    raise SafeMathError("resultado fuera de rango") from exc
+
+            if isinstance(result, complex) or not math.isfinite(float(result)):
+                raise SafeMathError("resultado fuera de rango")
+            if abs(float(result)) > MATH_MAX_ABS_RESULT:
+                raise SafeMathError("resultado demasiado grande")
+            return result
+
+        raise SafeMathError("operación no permitida")
+
+    return visit(tree)
+
+
+def _format_math_number(value: float | int) -> str:
+    number = float(value)
+    if abs(number) < 5e-13:
+        number = 0.0
+    if number.is_integer() and abs(number) < 1e21:
+        return str(int(number))
+    return format(number, ".12g")
+
+
+def _pretty_math_expression(display_expression: str) -> str:
+    text_value = display_expression.strip()
+    text_value = text_value.replace("**", "^")
+    text_value = text_value.replace("*", " × ").replace("/", " ÷ ")
+    text_value = re.sub(r"\s+", " ", text_value).strip()
+    return text_value
+
+
+async def handle_safe_math(message: Message) -> bool:
+    """Un cálculo correcto por usuario y por día local."""
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    text_value = message.text or message.caption or ""
+    expression, display_expression = _math_candidate_text(text_value)
+    if expression is None or display_expression is None:
+        return False
+
+    # Validar primero. Una expresión mal escrita no consume la oportunidad diaria.
+    try:
+        result = _safe_math_eval(expression)
+    except SafeMathError as exc:
+        await message.reply_text(
+            f"🧮 Esa cuenta no me cuadra, {display_name(message)}: {exc}."
+        )
+        return True
+
+    today = datetime.now(BOT_TZ).strftime("%Y-%m-%d")
+    allowed = db.claim_daily_user_event(
+        MATH_DAILY_EVENT_KEY,
+        int(user.id),
+        user.username or str(user.id),
+        today,
+    )
+
+    if not allowed:
+        await message.reply_text(
+            choose_random(
+                f"math_daily_limit:{user.id}",
+                MATH_DAILY_LIMIT_MESSAGES,
+                display_name(message),
+            )
+        )
+        db.add_history(
+            f"CALCULO LIMITADO | {display_name(message)} | chat {message.chat_id} | fecha {today}"
+        )
+        return True
+
+    pretty_expression = _pretty_math_expression(display_expression)
+    pretty_result = _format_math_number(result)
+    await message.reply_text(
+        f"🧮 {pretty_expression} = {pretty_result}"
+    )
+    db.add_history(
+        f"CALCULO MATEMATICO | {display_name(message)} | chat {message.chat_id} "
+        f"| {display_expression} = {pretty_result}"
+    )
+    return True
+
+
 async def handle_custom_qa(message: Message) -> bool:
     """Responde reglas configuradas desde /config antes de respuestas genéricas."""
     text_value = message.text or message.caption or ""
@@ -9756,6 +10000,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # sobre búsquedas técnicas y respuestas genéricas de Pecos.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_custom_qa(message):
+            return
+
+        # Cálculo matemático seguro: una respuesta por usuario y por día.
+        # Se procesa antes de la respuesta genérica a preguntas dirigidas a Pecos.
+        if await handle_safe_math(message):
             return
 
     if await handle_identity(message, context):
