@@ -69,12 +69,16 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.28-password-joke-fallback"
+VERSION = "2.8.29-test-group-no-scheduled-messages"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
     if x.strip()
 }
+TEST_GROUP_ID = int(
+    os.getenv("TEST_GROUP_ID", "-1004469972566").strip()
+    or "-1004469972566"
+)
 MAX_HASH_DOWNLOAD = 20 * 1024 * 1024
 MAX_HISTORY = 500
 
@@ -10360,6 +10364,11 @@ async def check_group_silence(application: Application) -> None:
         if chat_id not in ALLOWED_GROUP_IDS:
             continue
 
+        # El grupo de pruebas sirve para validar funciones manuales y búsquedas,
+        # pero NO recibe intervenciones automáticas por silencio.
+        if chat_id == TEST_GROUP_ID:
+            continue
+
         activity_anchor = str(row["last_seen"] or "").strip()
         if not activity_anchor:
             continue
@@ -10426,7 +10435,10 @@ async def daily_loop(application: Application) -> None:
                 )
                 groups = [
                     row for row in db.list_groups()
-                    if int(row["chat_id"]) in ALLOWED_GROUP_IDS
+                    if (
+                        int(row["chat_id"]) in ALLOWED_GROUP_IDS
+                        and int(row["chat_id"]) != TEST_GROUP_ID
+                    )
                 ]
 
                 sent = 0
@@ -10444,7 +10456,8 @@ async def daily_loop(application: Application) -> None:
 
                 db.set_setting("last_daily_sent_date", today)
                 db.add_history(
-                    f"MENSAJE DIARIO ALEATORIO enviado a {sent} grupo(s)."
+                    f"MENSAJE DIARIO ALEATORIO enviado a {sent} grupo(s). "
+                    f"Grupo de pruebas {TEST_GROUP_ID} excluido."
                 )
 
         except asyncio.CancelledError:
