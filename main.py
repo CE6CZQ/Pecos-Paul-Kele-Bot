@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.26-safe-math-daily-limit"
+VERSION = "2.8.27-strict-model-anchor"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -286,7 +286,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
-TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.1-multi-model-suffix"
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.2-strict-model-anchor"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -4014,22 +4014,23 @@ def technical_catalog_detect_brands(file_name: str) -> list[str]:
         or "MOTOTRBO" in compact
         or compact.startswith("APX")
         or re.search(
-            r"\b(?:XTS|XTL|DEP|DGP|DP|EM|EP|GM|GP|PRO)\s*\d+",
+            r"\b(?:XTS|XTL|XPR|DEP|DGP|DP|EM|EP|GM|GP|PRO)\s*\d+",
             spaced,
         )
+        or re.search(r"\bXIR\s*[PM]\s*\d+", spaced)
     ):
         found.append("MOTOROLA")
 
     if (
         re.search(r"\bKENWOOD\b", spaced)
-        or re.search(r"\b(?:KPG|NX|NXR|TKR|TK)\s*[A-Z]?\d+", spaced)
+        or re.search(r"\b(?:KPG|NX|NXR|TKR|TK|TM)\s*[A-Z]?\d+", spaced)
         or re.match(r"^KPG[A-Z]*\d+", compact)
     ):
         found.append("KENWOOD")
 
     if (
         re.search(r"\bHYTERA\b", spaced)
-        or re.search(r"\b(?:PD|HP|HM|HR|PNC)\s*\d+", spaced)
+        or re.search(r"\b(?:PD|HP|HM|HR|PNC|MD|RD|TC)\s*\d+", spaced)
     ):
         found.append("HYTERA")
 
@@ -4254,8 +4255,12 @@ TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
     ("NXR", r"\bNXR\s*(\d{3,4})\b"),
     ("TKR", r"\bTKR\s*(\d{3,4})\b"),
     ("TK",  r"\bTK\s*(\d{3,4})\b"),
+    ("TM",  r"\bTM\s*(\d{3,4}[A-Z]?)\b"),
     ("XTS", r"\bXTS\s*(\d{3,5})\b"),
     ("XTL", r"\bXTL\s*(\d{3,5})\b"),
+    ("XPR", r"\bXPR\s*(\d{3,5}[A-Z]?)\b"),
+    ("XIR-P", r"\bXIR\s*P\s*(\d{3,5}[A-Z]?)\b"),
+    ("XIR-M", r"\bXIR\s*M\s*(\d{3,5}[A-Z]?)\b"),
     ("DEP", r"\bDEP\s*(\d{3,5})\b"),
     ("DGP", r"\bDGP\s*(\d{3,5}[A-Z]?)\b"),
     ("DP",  r"\bDP\s*(\d{3,5}[A-Z]?)\b"),
@@ -4271,9 +4276,10 @@ TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
     ("HM",  r"\bHM\s*(\d{3,4})\b"),
     ("HR",  r"\bHR\s*(\d{3,4})\b"),
     ("PNC", r"\bPNC\s*(\d+[A-Z]?)\b"),
+    ("MD",  r"\bMD\s*(\d{3,4}[A-Z]?)\b"),
+    ("RD",  r"\bRD\s*(\d{3,4}[A-Z]?)\b"),
+    ("TC",  r"\bTC\s*(\d{3,4}[A-Z]?)\b"),
     ("VXR", r"\bVXR\s*(\d+)\b"),
-    ("MD",  r"\bMD\s*(\d{3,4})\b"),
-    ("TC",  r"\bTC\s*(\d{3,4})\b"),
     ("FT",  r"\bFT\s*(\d{3,4})\b"),
     ("UV",  r"\bUV\s*(\d+[A-Z]*)\b"),
 )
@@ -4595,8 +4601,12 @@ TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("NXR", r"\bNXR[-_ ]?(\d{3,4})\b"),
     ("TKR", r"\bTKR[-_ ]?(\d{3,4})\b"),
     ("TK",  r"\bTK[-_ ]?(\d{3,4})\b"),
+    ("TM",  r"\bTM[-_ ]?(\d{3,4}[A-Z]?)\b"),
     ("XTS", r"\bXTS[-_ ]?(\d{3,5})\b"),
     ("XTL", r"\bXTL[-_ ]?(\d{3,5})\b"),
+    ("XPR", r"\bXPR[-_ ]?(\d{3,5}[A-Z]?)\b"),
+    ("XIR-P", r"\bXIR[-_ ]?P[-_ ]?(\d{3,5}[A-Z]?)\b"),
+    ("XIR-M", r"\bXIR[-_ ]?M[-_ ]?(\d{3,5}[A-Z]?)\b"),
     ("DEP", r"\bDEP[-_ ]?(\d{3,5})\b"),
     ("DGP", r"\bDGP[-_ ]?(\d{3,5}[A-Z]?)\b"),
     ("DP",  r"\bDP[-_ ]?(\d{3,5}[A-Z]?)\b"),
@@ -4612,6 +4622,9 @@ TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("HM",  r"\bHM[-_ ]?(\d{3,4})\b"),
     ("HR",  r"\bHR[-_ ]?(\d{3,4})\b"),
     ("PNC", r"\bPNC[-_ ]?(\d+[A-Z]?)\b"),
+    ("MD",  r"\bMD[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("RD",  r"\bRD[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("TC",  r"\bTC[-_ ]?(\d{3,4}[A-Z]?)\b"),
 )
 
 
@@ -4662,6 +4675,76 @@ def technical_query_detect_models(query: str) -> list[str]:
             add(f"DGM-{number}")
 
     return result
+
+
+def technical_query_detect_raw_model_anchors(
+    query: str,
+    models: list[str],
+    brands: list[str],
+) -> list[str]:
+    """Detecta destinos de modelo que NO pueden degradarse a búsqueda por marca.
+
+    Ejemplos:
+      HYTERA MD616 -> MD-616 (modelo canónico; no queda como raw)
+      HYTERA RD985 -> RD-985 (modelo canónico; no queda como raw)
+      HYTERA 626   -> ancla raw "626"
+      MOTOROLA XPR7550E -> XPR-7550E si el parser lo reconoce; de lo contrario
+                           el identificador explícito sigue siendo obligatorio.
+
+    Una ancla raw nunca se usa para "rellenar" resultados: si no existe una
+    coincidencia segura, la búsqueda devuelve cero filas.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    canonical_compacts = {
+        technical_term_normalized(model)
+        for model in models
+        if model
+    }
+
+    def add(value: str) -> None:
+        normalized = technical_term_normalized(value)
+        if not normalized or normalized in canonical_compacts or normalized in seen:
+            return
+        seen.add(normalized)
+        result.append(value.upper())
+
+    # Identificadores alfanuméricos explícitos. archive_model_terms ya exige
+    # prefijo alfabético + 3-5 dígitos y evita confundir revisiones cortas.
+    for identifier in archive_model_terms(query):
+        add(identifier)
+
+    # Modelo escrito solo con números, únicamente si hay una marca explícita.
+    # Así "Hytera 626" es específico, mientras que un "626" aislado no activa
+    # por sí solo esta regla.
+    if brands:
+        q = technical_ascii_upper(query)
+        for match in re.finditer(r"\b(\d{3,5}[A-Z]?)\b", q):
+            token = match.group(1)
+
+            # No tomar partes de versiones decimales: 2.159.384.0.
+            before = q[match.start() - 1] if match.start() > 0 else ""
+            after = q[match.end()] if match.end() < len(q) else ""
+            if before == "." or after == ".":
+                continue
+
+            # Años no son modelos.
+            if token.isdigit() and len(token) == 4 and 1900 <= int(token) <= 2099:
+                continue
+
+            left = q[max(0, match.start() - 12):match.start()]
+            right = q[match.end():match.end() + 10]
+
+            # Evitar frecuencias y números declarados como versión/build.
+            if re.search(r"(?:VERSION|VERSIÓN|BUILD|REV|V|R)\s*$", left):
+                continue
+            if re.match(r"\s*(?:MHZ|KHZ|HZ)\b", right):
+                continue
+
+            add(token)
+
+    return result
+
 
 def technical_query_detect_versions(query: str) -> list[str]:
     q = technical_ascii_upper(query)
@@ -4725,6 +4808,12 @@ def technical_query_interpret(query: str) -> dict[str, object]:
         "SDR": ("SDR",),
     })
 
+    raw_model_anchors = technical_query_detect_raw_model_anchors(
+        query,
+        models,
+        brands,
+    )
+
     q_norm = technical_term_normalized(query)
     resources = technical_query_detect_aliases(query, {
         "CPS": ("CPS", "SOFTWARE DE PROGRAMACION", "SOFTWARE PROGRAMACION"),
@@ -4761,14 +4850,18 @@ def technical_query_interpret(query: str) -> dict[str, object]:
     if "MOTOTRBO" in technologies or "APX" in technologies or "ASTRO" in technologies:
         inferred_brand = "MOTOROLA"
     elif any(
-        m.startswith(("APX-", "XTS-", "XTL-", "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-", "DGM-", "DEM-"))
+        m.startswith((
+            "APX-", "XTS-", "XTL-", "XPR-", "XIR-P-", "XIR-M-",
+            "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-",
+            "DGM-", "DEM-"
+        ))
         or m in {"R2", "R5", "R7", "R7EX", "DGP", "DGM", "DEM", "SLR", "DM1XXX"}
         for m in models
     ):
         inferred_brand = "MOTOROLA"
-    elif any(m.startswith(("KPG-", "NX-", "NXR-", "TKR-", "TK-")) for m in models):
+    elif any(m.startswith(("KPG-", "NX-", "NXR-", "TKR-", "TK-", "TM-")) for m in models):
         inferred_brand = "KENWOOD"
-    elif any(m.startswith(("PD-", "HP-", "HM-", "HR-", "PNC-")) for m in models):
+    elif any(m.startswith(("PD-", "HP-", "HM-", "HR-", "PNC-", "MD-", "RD-", "TC-")) for m in models):
         inferred_brand = "HYTERA"
     if inferred_brand and inferred_brand not in brands:
         brands.append(inferred_brand)
@@ -4786,6 +4879,7 @@ def technical_query_interpret(query: str) -> dict[str, object]:
     }
     return {
         "models": models,
+        "raw_model_anchors": raw_model_anchors,
         "brands": brands,
         "technologies": technologies,
         "resources": resources,
@@ -4829,6 +4923,66 @@ def technical_catalog_fetch_exact(
     """
     with db.lock:
         return db.conn.execute(sql, params).fetchall()
+
+
+
+def technical_catalog_fetch_candidates(
+    chat_id: int,
+    requirements: list[tuple[str, str]],
+) -> list[sqlite3.Row]:
+    """Obtiene candidatos base sin relajar ninguna condición existente."""
+    if requirements:
+        return technical_catalog_fetch_exact(chat_id, requirements)
+
+    with db.lock:
+        return db.conn.execute(
+            """
+            SELECT c.chat_id, c.sha256, c.message_id, c.file_unique_id, c.file_name,
+                   c.file_size, c.sender_id, c.sender_name, c.first_seen,
+                   c.brands, c.resources, c.technologies, c.software,
+                   c.versions, c.models, c.equipment_classes, c.search_text
+            FROM technical_file_catalog c
+            WHERE c.chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchall()
+
+
+def technical_catalog_row_matches_strict_anchor(
+    row: sqlite3.Row,
+    anchor: str,
+) -> bool:
+    """Exige coincidencia real del modelo/identificador solicitado.
+
+    No usa similitud difusa. Para "626" acepta un modelo catalogado que termine
+    exactamente en 626 (TC-626, MD-626, etc.) o el token 626 visible en el nombre.
+    """
+    anchor_norm = technical_term_normalized(anchor)
+    if not anchor_norm:
+        return False
+
+    file_name = str(row["file_name"] or "")
+    if archive_name_matches_anchor(file_name, anchor):
+        return True
+
+    model_values = [
+        part.strip()
+        for part in str(row["models"] or "").split("|")
+        if part.strip()
+    ]
+
+    if anchor_norm.isdigit():
+        for model in model_values:
+            model_norm = technical_term_normalized(model)
+            if re.search(rf"{re.escape(anchor_norm)}$", model_norm):
+                return True
+        return False
+
+    for model in model_values:
+        if archive_name_matches_anchor(model, anchor):
+            return True
+
+    return False
 
 
 def technical_catalog_field_has(row: sqlite3.Row, field: str, wanted: str) -> bool:
@@ -4928,13 +5082,17 @@ def technical_catalog_search_rows(
     query: str,
     limit: int = ARCHIVE_SEARCH_MAX_RESULTS,
 ) -> tuple[bool, list[sqlite3.Row]]:
-    """Devuelve (consulta_estructurada, filas).
+    """Búsqueda técnica estructurada con anclas estrictas de modelo.
 
-    Si consulta_estructurada=True, una lista vacía es una respuesta válida y NO
-    se debe rellenar con coincidencias difusas del buscador antiguo.
+    Regla principal:
+      - una consulta amplia ("Hytera") puede devolver archivos generales;
+      - una consulta con modelo/identificador ("Hytera MD616", "Hytera 626")
+        SOLO devuelve archivos que satisfacen ese destino;
+      - si el destino no existe, devuelve [] y NO rellena con archivos de marca.
     """
     parsed = technical_query_interpret(query)
     models = list(parsed["models"])
+    raw_model_anchors = list(parsed.get("raw_model_anchors", []))
     brands = list(parsed["brands"])
     technologies = list(parsed["technologies"])
     resources = list(parsed["resources"])
@@ -4948,17 +5106,18 @@ def technical_catalog_search_rows(
     base.extend(("VERSION", value) for value in versions)
     base.extend(("EQUIPMENT_CLASS", value) for value in equipment_classes)
 
-    structured = bool(base or models)
+    has_specific_target = bool(models or raw_model_anchors)
+    structured = bool(base or has_specific_target)
     if not structured:
         return False, []
 
     max_results = max(1, min(12, int(limit)))
 
-    # Varios modelos se resuelven por separado. Así EM200 + PRO5100 no exige
-    # que ambos aparezcan en el mismo nombre de archivo.
-    if models:
+    if has_specific_target:
         per_target: list[list[tuple[float, sqlite3.Row]]] = []
         all_scored: list[tuple[float, sqlite3.Row]] = []
+
+        # Modelos que el catálogo conoce de forma canónica.
         for model in models:
             requirements = list(base)
             if model.startswith("KPG-"):
@@ -4968,10 +5127,8 @@ def technical_catalog_search_rows(
 
             rows = technical_catalog_fetch_exact(chat_id, requirements)
 
-            # Si el usuario pide "CPS" para un MODELO concreto y el nombre
-            # histórico no etiqueta el recurso como CPS (caso típico: KPG-D6
-            # para NX-1300), hacemos un fallback CONTROLADO solo por ese modelo.
-            # No se aplica a búsquedas amplias como "Kenwood DMR CPS".
+            # Fallback controlado ya existente: CPS + modelo concreto.
+            # Solo quita la etiqueta CPS, NUNCA quita el modelo.
             if not rows and ("RESOURCE", "CPS") in requirements:
                 fallback_requirements = [
                     item for item in requirements
@@ -4993,10 +5150,35 @@ def technical_catalog_search_rows(
             per_target.append(ranked)
             all_scored.extend(ranked)
 
-        # Cobertura primero: si se pidieron varios modelos, intenta mostrar al
-        # menos la mejor coincidencia de cada uno antes de completar el cupo.
+        # Identificadores/modelos explícitos no catalogados de forma canónica,
+        # incluyendo números solos acompañados por una marca: "Hytera 626".
+        if raw_model_anchors:
+            raw_candidates = technical_catalog_fetch_candidates(chat_id, base)
+
+            for anchor in raw_model_anchors:
+                anchor_rows = [
+                    row
+                    for row in raw_candidates
+                    if technical_file_allowed(str(row["file_name"] or ""))
+                    and technical_catalog_row_matches_strict_anchor(row, anchor)
+                ]
+
+                ranked = [
+                    (technical_catalog_rank(row, query, base) + 100.0, row)
+                    for row in anchor_rows
+                ]
+                ranked.sort(
+                    key=lambda item: (item[0], int(item[1]["message_id"])),
+                    reverse=True,
+                )
+                per_target.append(ranked)
+                all_scored.extend(ranked)
+
+        # Cobertura por destino: si se pidieron varios modelos, intenta dar
+        # primero la mejor coincidencia de cada uno.
         selected: list[sqlite3.Row] = []
         seen_sha: set[str] = set()
+
         for ranked in per_target:
             if not ranked:
                 continue
@@ -5010,6 +5192,7 @@ def technical_catalog_search_rows(
             key=lambda item: (item[0], int(item[1]["message_id"])),
             reverse=True,
         )
+
         for _score, row in all_scored:
             if len(selected) >= max_results:
                 break
@@ -5018,8 +5201,12 @@ def technical_catalog_search_rows(
                 continue
             seen_sha.add(sha)
             selected.append(row)
+
+        # CRÍTICO: si no hubo coincidencia para el/los destinos específicos,
+        # devolvemos vacío. No existe fallback genérico por marca.
         return True, selected[:max_results]
 
+    # Consulta amplia sin modelo: mantiene el comportamiento previo.
     rows = technical_catalog_fetch_exact(chat_id, base)
     ranked = [
         (technical_catalog_rank(row, query, base), row)
@@ -5227,14 +5414,31 @@ async def send_archive_search_results(
     usuario = display_name(message)
 
     if not rows:
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=(
-                f"🌵 {usuario}, Pecos revisó el archivo del pueblo y no encontró un archivo que "
-                f"cumpla suficientemente con «{' '.join(terms)}». Prefiero no mostrar coincidencias "
-                "parciales que puedan corresponder a otro equipo, marca o plataforma."
-            ),
+        parsed_query = technical_query_interpret(" ".join(terms))
+        specific_targets = (
+            list(parsed_query.get("models", []))
+            + list(parsed_query.get("raw_model_anchors", []))
         )
+
+        if specific_targets:
+            target_text = " / ".join(str(value).upper() for value in specific_targets)
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    f"🔎 {usuario}, Pecos buscó «{' '.join(terms).upper()}», pero no encontró "
+                    f"un archivo que pueda asociar con suficiente seguridad a {target_text}. "
+                    "No mostraré archivos generales de la marca como sustituto."
+                ),
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    f"🌵 {usuario}, Pecos revisó el archivo del pueblo y no encontró un archivo que "
+                    f"cumpla suficientemente con «{' '.join(terms)}». Prefiero no mostrar coincidencias "
+                    "parciales que puedan corresponder a otro equipo, marca o plataforma."
+                ),
+            )
         return True
 
     requested_models = archive_model_terms(query)
