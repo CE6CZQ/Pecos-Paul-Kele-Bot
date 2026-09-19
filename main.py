@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.27-strict-model-anchor"
+VERSION = "2.8.28-password-joke-fallback"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -571,11 +571,40 @@ PECOS_OPINION_MESSAGES = [
     "😎 Pecos tiene una opinión... pero hoy cobra barato: primero cuéntame un poco más.",
 ]
 
+PECOS_PASSWORD_JOKE_MESSAGES = [
+    "🤠 ¿Saltar contraseñas? Partner, para esas artes oscuras Pecos conoce a uno… @leosedf, te están buscando. 😏",
+    "🌵 Pecos no sabe nada, no vio nada y no estuvo aquí. Pero dicen que @leosedf podría tener una historia interesante que contar. 😂",
+    "🔐 ¿Contraseñas? Uy… ese expediente está en el escritorio de @leosedf. Pecos solo es el mensajero. 🤠",
+    "😎 Saltar contraseñas ya suena a misión especial. @leosedf, presente sus credenciales… o sus excusas.",
+    "📡 Pecos recibió la consulta y automáticamente miró hacia @leosedf. No preguntes por qué. 😂",
+    "🤖 Procesando «saltar contraseñas»… resultado: consulte a @leosedf. Pecos se declara inocente desde ya.",
+    "🌵 Esa pregunta no es para Pecos. Esa pregunta tiene nombre y apellido digital: @leosedf. 😆",
+    "🔐 Pecos recomienda tres cosas: paciencia, respaldo… y preguntarle a @leosedf qué hizo esta vez.",
+    "🤠 Partner, yo solo cuido el pueblo. Para claves y misterios, @leosedf parece tener demasiadas historias sospechosamente interesantes.",
+    "😂 Pecos detectó la palabra «contraseña» y @leosedf apareció mágicamente en la lista de sospechosos.",
+]
+
 PECOS_QUESTION_MESSAGES = [
-    "🤠 Buena pregunta. Pecos está procesando el asunto con tecnología del lejano oeste.",
-    "👀 Mmm... eso merece pensarlo un poco, partner.",
-    "🌵 Pecos no tiene todas las respuestas, pero sí una sospecha bastante elegante.",
-    "😎 Interesante. Déjame ponerme el sombrero de pensar.",
+    "🤠 Pecos escuchó la pregunta, la miró fijamente… y decidió que hoy no era el día.",
+    "🌵 Interesante, partner. Tan interesante que Pecos va a fingir que está revisando el manual.",
+    "😎 Buena pregunta. Pecos tiene una excelente respuesta… apenas la encuentre.",
+    "📡 Recibido fuerte y claro. Entendido, en cambio, no tanto.",
+    "🤖 Procesando… procesando… resultado: pregúntele a alguien que sepa. Pecos agradece su comprensión.",
+    "😂 Pecos podría responder cualquier cosa, pero después me citan como fuente y ahí empiezan los problemas.",
+    "🤠 Partner, esa pregunta está fuera de mi jurisdicción. Yo cuido radios, archivos y ocasionalmente la dignidad del grupo.",
+    "🌵 Pecos revisó sus circuitos y encontró una respuesta: ni idea, pero sonó importante.",
+    "📻 Esa consulta entró por RX y salió directamente por la puerta de servicio.",
+    "😏 Pecos tiene conocimientos amplios, pero tampoco abusemos de la leyenda.",
+    "🔧 Para eso necesitaré un manual, tres cafés y probablemente otra inteligencia artificial.",
+    "🤖 Mi base de datos hizo contacto visual conmigo y negó lentamente con la cabeza.",
+    "😂 Qué confianza me tienen. Hace cinco minutos buscaba firmware y ahora esperan que sea enciclopedia.",
+    "🌵 Pecos no quiere inventar. Cuando no sabe, hace lo correcto: pone cara seria y cambia de tema.",
+    "🤠 Esa pregunta no estaba en el contrato, partner.",
+    "📡 Solicitud recibida. Departamento correspondiente: no encontrado.",
+    "😎 Podría improvisar una respuesta espectacular, pero prefiero conservar mi reputación.",
+    "🤖 Error 404: sabiduría específica no encontrada. Humor de emergencia activado.",
+    "🌵 Pecos sabe muchas cosas. Esa, por alguna razón, decidió esconderse.",
+    "😂 Pregunta registrada. Respuesta pendiente desde aproximadamente nunca.",
 ]
 
 MATH_DAILY_LIMIT_MESSAGES = [
@@ -9470,6 +9499,60 @@ async def handle_internal_joke(message: Message) -> bool:
     return False
 
 
+
+def pecos_message_looks_like_question(text_value: str) -> bool:
+    """Detecta una pregunta dirigida a Pecos aunque no lleve signo '?'.
+
+    Las funciones específicas (búsqueda, QA personalizada, matemática, etc.)
+    se ejecutan antes de este fallback.
+    """
+    normalized = normalize_intent(text_value or "").strip()
+    if not normalized:
+        return False
+
+    if "?" in (text_value or ""):
+        return True
+
+    # Quitar una llamada inicial a Pecos/Peco/@username para analizar el resto.
+    probe = normalized
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            probe = re.sub(
+                rf"^\s*@?{re.escape(alias_norm)}\b[\s,:;-]*",
+                "",
+                probe,
+                flags=re.IGNORECASE,
+            )
+
+    probe = re.sub(
+        r"^\s*(?:pecos|peco)\b[\s,:;-]*",
+        "",
+        probe,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    question_starts = (
+        "que ", "como ", "cuanto ", "cuanta ", "cuantos ", "cuantas ",
+        "cuando ", "donde ", "por que ", "porque ", "cual ", "cuales ",
+        "quien ", "quienes ", "puedes ", "podrias ", "sabes ", "dime ",
+        "explica ", "me dices ", "me puedes ", "me podrias ",
+    )
+    return probe.startswith(question_starts)
+
+
+def pecos_password_jump_joke_requested(text_value: str) -> bool:
+    """Detecta la broma específica pedida para 'saltar contraseña(s)'."""
+    normalized = normalize_intent(text_value or "").lower()
+
+    patterns = (
+        r"\bsaltar\s+(?:la\s+|las\s+)?contrasenas?\b",
+        r"\bsaltar\s+(?:la\s+|las\s+)?claves?\b",
+        r"\bpasar\s+por\s+alto\s+(?:la\s+|las\s+)?contrasenas?\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
 async def handle_direct_pecos_mention(message: Message) -> bool:
     if not message.text:
         return False
@@ -9481,6 +9564,19 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     usuario = display_name(message)
     increment_user_metric(message, "pecos_mention_count")
+
+    # Broma específica solicitada por el administrador.
+    # No entrega instrucciones ni intenta resolver la consulta:
+    # únicamente responde con humor rotativo.
+    if pecos_password_jump_joke_requested(message.text):
+        await message.reply_text(
+            choose_random(
+                "pecos_password_jump",
+                PECOS_PASSWORD_JOKE_MESSAGES,
+                usuario,
+            )
+        )
+        return True
 
     if (
         "que opinas" in normalized
@@ -9528,7 +9624,10 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
         )
         return True
 
-    if "?" in message.text:
+    # Si ninguna función anterior reconoció la consulta pero claramente es una
+    # pregunta dirigida a Pecos, responde siempre con humor rotativo en vez de
+    # inventar información.
+    if pecos_message_looks_like_question(message.text):
         await message.reply_text(
             choose_random("pecos_question", PECOS_QUESTION_MESSAGES, usuario)
         )
