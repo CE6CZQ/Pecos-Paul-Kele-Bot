@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.29-test-group-no-scheduled-messages"
+VERSION = "2.8.30-context-learning-foundation"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -361,9 +361,14 @@ QUESTION_STOPWORDS = {
     "necesito", "busco", "consulta", "pregunta",
 }
 
-REPUTATION_MILESTONES = (3, 7, 12, 20)
+REPUTATION_MILESTONES = (1, 3, 7, 12, 20)
 
 REPUTATION_MESSAGES = {
+    1: [
+        "📦 Pecos toma nota: {usuario} acaba de dejar un aporte nuevo en el archivo del pueblo. Gracias, partner.",
+        "🤠 Nuevo aporte detectado de {usuario}. Pecos lo guarda en la memoria buena del territorio.",
+        "⭐ {usuario} sumó material nuevo al grupo. Ese sí es un aporte que Pecos reconoce.",
+    ],
     3: [
         "⭐ Pecos toma nota: {usuario} ya ha dejado varias ayudas útiles por este pueblo. Se agradece, partner.",
         "🤠 Pecos reconoce a {usuario}: ya van varias contribuciones útiles. Buen vecino del territorio.",
@@ -385,6 +390,14 @@ REPUTATION_MESSAGES = {
         "🦅 {usuario}, Pecos te tiene en la memoria buena del territorio. Gracias por sostener el espíritu de ayuda del grupo.",
     ],
 }
+
+FILE_CONTRIBUTION_MESSAGES = [
+    "📦 Pecos toma nota: {usuario} acaba de dejar un aporte nuevo en el archivo del pueblo. Gracias, partner.",
+    "🤠 Nuevo aporte detectado de {usuario}. Ese sí merece saludo de Pecos.",
+    "⭐ {usuario} sumó material nuevo al grupo. Pecos lo registra como aporte real.",
+    "🦅 Archivo nuevo de {usuario}. Pecos hace un gesto con el sombrero: se agradece el aporte.",
+    "🌵 Eso sí cuenta como contribución, {usuario}: material nuevo para el grupo. Pecos lo tiene presente.",
+]
 
 REPEATED_QUESTION_MESSAGES = [
     "🌵 {usuario}, esa pregunta ya pasó por este saloon hace poco. Pecos encontró una conversación muy parecida.",
@@ -586,6 +599,27 @@ PECOS_PASSWORD_JOKE_MESSAGES = [
     "🔐 Pecos recomienda tres cosas: paciencia, respaldo… y preguntarle a @leosedf qué hizo esta vez.",
     "🤠 Partner, yo solo cuido el pueblo. Para claves y misterios, @leosedf parece tener demasiadas historias sospechosamente interesantes.",
     "😂 Pecos detectó la palabra «contraseña» y @leosedf apareció mágicamente en la lista de sospechosos.",
+]
+
+PECOS_UNKNOWN_MESSAGES = [
+    "🤠 Pecos escuchó eso y admite que no tiene una respuesta segura. Mejor decir «no sé» que inventar una burrada.",
+    "🌵 Esa se me escapó, partner. Pecos sabe de radios y del archivo del grupo, pero tampoco voy a fingir que sé de todo.",
+    "📡 Mensaje recibido. Respuesta confiable: no la tengo. Si aparece algo útil en el grupo, Pecos tomará nota.",
+    "😎 Pecos podría improvisar una respuesta espectacular… pero prefiero conservar la reputación y no inventar.",
+    "🤖 Resultado del diagnóstico: esa consulta está fuera de lo que Pecos puede responder con seguridad por ahora.",
+    "😂 Pecos también tiene derecho a decir «ni idea». Este pueblo es de ayuda técnica, no de adivinación.",
+    "🌵 No tengo una respuesta fiable para eso. Mejor un cactus honesto que una solución inventada.",
+    "📻 Esa consulta entró por RX, pero no encontré una respuesta segura para transmitir por TX.",
+    "🤠 Partner, ahí Pecos se declara fuera de cobertura. Si el grupo deja una solución clara, la guardaré para la próxima.",
+    "🥟 Pecos no confirma ni desmiente lo de la empanada. Lo que sí confirma es que para esa frase no tengo una función técnica preparada. 😂",
+]
+
+PECOS_CORRECTION_MESSAGES = [
+    "😂 Puede ser, partner. Pecos también se equivoca. Si una respuesta salió chueca, márcame la consulta y la revisamos.",
+    "🤠 Pecos no va a hacerse el infalible. Si me perdí en una respuesta, acepto el tirón de orejas digital.",
+    "🌵 Correcto: Pecos puede meter la pata. Lo importante es no inventar y corregir el rumbo cuando haga falta.",
+    "📡 Crítica recibida fuerte y clara. Pecos revisa el mapa; hasta los sheriffs se pueden equivocar de camino.",
+    "😎 Si Pecos anda medio perdido, díganlo nomás. Prefiero corregir una respuesta que defender una burrada.",
 ]
 
 PECOS_QUESTION_MESSAGES = [
@@ -1084,6 +1118,7 @@ class Database:
                 restricted_count INTEGER NOT NULL DEFAULT 0,
                 rule_reminder_count INTEGER NOT NULL DEFAULT 0,
                 pecos_mention_count INTEGER NOT NULL DEFAULT 0,
+                file_contribution_score INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(chat_id, user_id)
             );
 
@@ -1094,6 +1129,14 @@ class Database:
                 milestone INTEGER NOT NULL,
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, user_id, milestone)
+            );
+
+            CREATE TABLE IF NOT EXISTS file_contribution_notices (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id)
             );
 
             CREATE TABLE IF NOT EXISTS question_history (
@@ -1146,6 +1189,22 @@ class Database:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, sha256)
             );
+
+            CREATE TABLE IF NOT EXISTS radio_software_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                variant TEXT NOT NULL DEFAULT '',
+                software TEXT NOT NULL,
+                aliases TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'ADMIN',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                created_at TEXT NOT NULL,
+                UNIQUE(model, variant, software)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_radio_software_model
+                ON radio_software_map(model, variant);
 
             CREATE TABLE IF NOT EXISTS technical_file_terms (
                 chat_id INTEGER NOT NULL,
@@ -1243,6 +1302,16 @@ class Database:
                 "ADD COLUMN equipment_classes TEXT NOT NULL DEFAULT ''"
             )
 
+        profile_columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(user_profiles)").fetchall()
+        }
+        if "file_contribution_score" not in profile_columns:
+            self.conn.execute(
+                "ALTER TABLE user_profiles "
+                "ADD COLUMN file_contribution_score INTEGER NOT NULL DEFAULT 0"
+            )
+
         self.conn.commit()
 
     def _ensure_defaults(self) -> None:
@@ -1280,6 +1349,28 @@ class Database:
                     (key, value),
                 )
 
+            # Asociación inicial confirmada por el administrador.
+            # La estructura queda lista para cargar más modelos/software después.
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO radio_software_map(
+                    brand, model, variant, software, aliases,
+                    source, confidence, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "KENWOOD",
+                    "TK-1300N",
+                    "K3",
+                    "KPG-D6",
+                    "TK1300N|TK-1300N|TK 1300N",
+                    "ADMIN_CONFIRMED",
+                    1.0,
+                    datetime.now(BOT_TZ).isoformat(timespec="seconds"),
+                ),
+            )
+
             self.conn.commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -1303,6 +1394,17 @@ class Database:
 
     def is_true(self, key: str) -> bool:
         return self.get_setting(key, "0") == "1"
+
+    def list_radio_software_map(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT id, brand, model, variant, software, aliases,
+                       source, confidence
+                FROM radio_software_map
+                ORDER BY brand, model, variant, software
+                """
+            ).fetchall()
 
     def list_terms(self) -> list[str]:
         with self.lock:
@@ -1959,6 +2061,7 @@ class Database:
             "restricted_count",
             "rule_reminder_count",
             "pecos_mention_count",
+            "file_contribution_score",
         }
         if counter_name not in allowed:
             raise ValueError(f"Contador no permitido: {counter_name}")
@@ -2008,6 +2111,22 @@ class Database:
                 (chat_id,),
             ).fetchall()
 
+    def count_conversation_messages_for_user(
+        self,
+        chat_id: int,
+        user_id: int,
+    ) -> int:
+        with self.lock:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM conversation_messages
+                WHERE chat_id = ? AND sender_id = ?
+                """,
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row["n"] or 0) if row else 0
+
     def get_activity_profiles(self, chat_id: int) -> list[sqlite3.Row]:
         """Perfiles recientes observados por Pecos. Solo lectura."""
         with self.lock:
@@ -2030,6 +2149,28 @@ class Database:
                 VALUES(?, ?, ?, ?)
                 """,
                 (chat_id, user_id, milestone, now),
+            )
+            inserted = self.conn.total_changes > before
+            self.conn.commit()
+        return inserted
+
+    def claim_file_contribution_notice(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+    ) -> bool:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            before = self.conn.total_changes
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO file_contribution_notices(
+                    chat_id, message_id, user_id, sent_at
+                )
+                VALUES(?, ?, ?, ?)
+                """,
+                (chat_id, message_id, user_id, now),
             )
             inserted = self.conn.total_changes > before
             self.conn.commit()
@@ -2636,6 +2777,16 @@ HUMOR_POOL_DEFINITIONS: dict[str, tuple[str, list[str], str]] = {
         SILENCE_MESSAGES,
         "Se usan cuando el detector de silencio interviene. Admite {horas}.",
     ),
+    "unknown": (
+        "🤷 Pecos no sabe / fuera de alcance",
+        PECOS_UNKNOWN_MESSAGES,
+        "Se usan cuando Pecos fue llamado directamente pero no tiene una respuesta segura.",
+    ),
+    "correction": (
+        "🛠️ Pecos acepta correcciones",
+        PECOS_CORRECTION_MESSAGES,
+        "Se usan cuando un usuario comenta que Pecos se equivocó, está perdido o respondió mal.",
+    ),
 }
 
 
@@ -3226,7 +3377,21 @@ def build_silence_message(elapsed_hours: float) -> str:
         get_humor_pool("silence"),
         "grupo",
     )
-    return template.replace("{horas}", format_hours_value(elapsed_hours))
+
+    # Gramática correcta:
+    # 1 hora
+    # 2 horas, 3 horas, etc.
+    hours_value = max(0, int(elapsed_hours))
+    hour_word = "hora" if hours_value == 1 else "horas"
+
+    # Los repertorios históricos usan "{horas} horas".
+    # Sustituimos primero la frase completa para no producir "1 horas".
+    rendered = template.replace(
+        "{horas} horas",
+        f"{hours_value} {hour_word}",
+    )
+    rendered = rendered.replace("{horas}", str(hours_value))
+    return rendered
 
 
 def has_archive_extension(file_name: str) -> bool:
@@ -3235,22 +3400,23 @@ def has_archive_extension(file_name: str) -> bool:
 
 
 def looks_like_helpful_contribution(message: Message) -> bool:
-    if message.document:
-        file_name = getattr(message.document, "file_name", "") or ""
-        if has_archive_extension(file_name):
-            return True
+    """Reconocimiento público: solo aportes reales de archivos.
 
-    text_value = (message.text or message.caption or "").strip()
-    if len(text_value) < 18:
+    La conversación normal, responder mensajes o usar palabras técnicas ya NO
+    incrementa el contador público de aportes. Además, este bloque se ejecuta
+    después del detector de duplicados, por lo que un archivo repetido no llega
+    a contabilizarse como aporte nuevo.
+    """
+    if not message.document:
         return False
 
-    normalized = normalize_intent(text_value)
-    return any(keyword in normalized for keyword in KNOWN_HELPFUL_KEYWORDS)
+    file_name = getattr(message.document, "file_name", "") or ""
+    return bool(file_name and has_archive_extension(file_name))
 
 
 def remember_helpful_contribution(message: Message) -> int | None:
     if looks_like_helpful_contribution(message):
-        return increment_user_metric(message, "helpful_score")
+        return increment_user_metric(message, "file_contribution_score")
     return None
 
 
@@ -3343,25 +3509,26 @@ async def maybe_send_reputation_notice(
     if not user or user.is_bot or not score:
         return False
 
-    milestone = None
-    for value in REPUTATION_MILESTONES:
-        if score >= value:
-            milestone = value
-
-    if milestone is None:
+    # Se ejecuta después del control de duplicados. Por tanto, si llegamos aquí
+    # con un documento técnico, es un aporte nuevo para esta ejecución.
+    if not looks_like_helpful_contribution(message):
         return False
 
-    if not db.claim_reputation_notice(message.chat_id, user.id, milestone):
+    if not db.claim_file_contribution_notice(
+        message.chat_id,
+        message.message_id,
+        user.id,
+    ):
         return False
 
     usuario = display_name(message)
-    template = random.choice(REPUTATION_MESSAGES[milestone])
+    template = random.choice(FILE_CONTRIBUTION_MESSAGES)
     await context.bot.send_message(
         chat_id=message.chat_id,
         text=template.replace("{usuario}", usuario),
     )
     db.add_history(
-        f"RECONOCIMIENTO PECOS | {usuario} | hito interno {milestone} | chat {message.chat_id}"
+        f"APORTE NUEVO PECOS | {usuario} | mensaje {message.message_id} | chat {message.chat_id}"
     )
     return True
 
@@ -3396,8 +3563,9 @@ async def capture_answer_to_known_question(
     ):
         return False
 
-    score = increment_user_metric(message, "helpful_score", 2)
-    await maybe_send_reputation_notice(message, context, score)
+    # La respuesta se conserva como aprendizaje conversacional, pero NO
+    # cuenta como "aporte de archivo" ni dispara reconocimientos públicos.
+    increment_user_metric(message, "helpful_score", 2)
     db.add_history(
         f"AYUDA DETECTADA | {display_name(message)} respondió pregunta {reply.message_id} "
         f"en chat {message.chat_id}."
@@ -5303,6 +5471,23 @@ def archive_query_from_natural_text(text_value: str) -> str | None:
     if not text_mentions_pecos(text_value):
         return None
 
+    # Primero usamos el parser técnico estructurado. Esto permite ignorar
+    # palabras coloquiales alrededor de una referencia fuerte:
+    # "Pecos rifatela porfa kpg d6" -> "KPG-D6".
+    parsed = technical_query_interpret(text_value)
+    parsed_models = list(parsed.get("models", []))
+    parsed_raw_models = list(parsed.get("raw_model_anchors", []))
+    parsed_brands = list(parsed.get("brands", []))
+    parsed_resources = list(parsed.get("resources", []))
+
+    if parsed_models or parsed_raw_models:
+        clean_parts: list[str] = []
+        for item in parsed_resources + parsed_brands + parsed_models + parsed_raw_models:
+            value = str(item).strip()
+            if value and value not in clean_parts:
+                clean_parts.append(value)
+        return " ".join(clean_parts)
+
     terms = extract_archive_terms(text_value)
     models = archive_model_terms(text_value)
     families = archive_family_terms(text_value)
@@ -5496,6 +5681,115 @@ async def send_archive_search_results(
     await context.bot.send_message(chat_id=chat.id, text="\n\n".join(lines))
     db.add_history(
         f"ARCHIVO BUSCADO | {usuario} | {' '.join(terms)} | resultados={len(rows)}"
+    )
+    return True
+
+
+
+def radio_software_request_signal(text_value: str) -> bool:
+    normalized = normalize_intent(text_value or "")
+    signals = (
+        "kpg", "software", "programa", "programacion", "programar",
+        "cps", "alguien tendra", "alguien tiene", "me pueda ayudar",
+        "me pueden ayudar", "que usa", "cual usa", "para un radio",
+        "para una radio",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+def find_radio_software_associations(text_value: str) -> list[sqlite3.Row]:
+    if not text_value:
+        return []
+
+    normalized = normalize_intent(text_value)
+    compact_text = re.sub(r"[^a-z0-9]", "", normalized)
+    matches: list[sqlite3.Row] = []
+
+    for row in db.list_radio_software_map():
+        aliases = [
+            str(row["model"] or ""),
+            *[
+                item.strip()
+                for item in str(row["aliases"] or "").split("|")
+                if item.strip()
+            ],
+        ]
+
+        model_match = False
+        for alias in aliases:
+            alias_compact = re.sub(
+                r"[^a-z0-9]",
+                "",
+                normalize_intent(alias),
+            )
+            if alias_compact and alias_compact in compact_text:
+                model_match = True
+                break
+
+        if not model_match:
+            continue
+
+        variant = str(row["variant"] or "").strip()
+        if variant:
+            variant_compact = re.sub(
+                r"[^a-z0-9]",
+                "",
+                normalize_intent(variant),
+            )
+            if variant_compact and variant_compact not in compact_text:
+                continue
+
+        matches.append(row)
+
+    return matches
+
+
+async def handle_radio_software_association(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    text_value = message.text or message.caption or ""
+    if not text_value or not radio_software_request_signal(text_value):
+        return False
+
+    associations = find_radio_software_associations(text_value)
+    if not associations:
+        return False
+
+    usuario = display_name(message)
+    row = associations[0]
+
+    brand = str(row["brand"] or "").strip()
+    model = str(row["model"] or "").strip()
+    variant = str(row["variant"] or "").strip()
+    software = str(row["software"] or "").strip()
+
+    model_label = " ".join(part for part in (brand, model, variant) if part)
+
+    # La relación modelo/software viene de la tabla confirmada. Después se
+    # consulta el catálogo real para entregar enlace SOLO si el archivo existe.
+    rows = search_archive_rows(message.chat_id, software, limit=3)
+
+    lines = [
+        f"👀 {usuario}, Pecos tiene registrado que para {model_label} "
+        f"el software asociado es {software}."
+    ]
+
+    if rows:
+        lines.append("📦 Además lo encontré en los archivos del grupo:")
+        lines.extend(archive_result_lines(message.chat, rows, max_items=3))
+    else:
+        lines.append(
+            f"🌵 La asociación con {software} está registrada, pero ahora mismo "
+            "no encontré un archivo del grupo que pueda enlazar con suficiente seguridad."
+        )
+
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        text="\n\n".join(lines),
+    )
+    db.add_history(
+        f"ASOCIACION RADIO-SOFTWARE | {model_label} -> {software} | {usuario}"
     )
     return True
 
@@ -6365,6 +6659,10 @@ def humor_menu() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🕘 Saludos diarios", callback_data="humor:list:daily"),
                 InlineKeyboardButton("🌵 Silencio", callback_data="humor:list:silence"),
+            ],
+            [
+                InlineKeyboardButton("🤷 No sé / fuera de alcance", callback_data="humor:list:unknown"),
+                InlineKeyboardButton("🛠️ Correcciones", callback_data="humor:list:correction"),
             ],
             [InlineKeyboardButton("🎭 Bromas internas", callback_data="menu:jokes")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu:main")],
@@ -9540,7 +9838,9 @@ def pecos_message_looks_like_question(text_value: str) -> bool:
         "que ", "como ", "cuanto ", "cuanta ", "cuantos ", "cuantas ",
         "cuando ", "donde ", "por que ", "porque ", "cual ", "cuales ",
         "quien ", "quienes ", "puedes ", "podrias ", "sabes ", "dime ",
-        "explica ", "me dices ", "me puedes ", "me podrias ",
+        "explica ", "muestrame ", "muéstrame ", "ensename ", "enseñame ",
+        "cuentame ", "cuéntame ", "hablame ", "háblame ",
+        "me dices ", "me puedes ", "me podrias ",
     )
     return probe.startswith(question_starts)
 
@@ -9553,6 +9853,20 @@ def pecos_password_jump_joke_requested(text_value: str) -> bool:
         r"\bsaltar\s+(?:la\s+|las\s+)?contrasenas?\b",
         r"\bsaltar\s+(?:la\s+|las\s+)?claves?\b",
         r"\bpasar\s+por\s+alto\s+(?:la\s+|las\s+)?contrasenas?\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+
+def pecos_is_being_corrected(text_value: str) -> bool:
+    normalized = normalize_intent(text_value or "").lower()
+
+    patterns = (
+        r"\bpecos\b.*\b(perdido|equivocado|confundido|fallando|fallo|mal)\b",
+        r"\bpeco\b.*\b(perdido|equivocado|confundido|fallando|fallo|mal)\b",
+        r"\b(te equivocaste|te confundiste|estas perdido|andas perdido)\b",
+        r"\b(respuesta|respuestas)\b.*\b(mal|equivocad|perdid|confus)\w*",
+        r"\bno sabes\b",
     )
     return any(re.search(pattern, normalized) for pattern in patterns)
 
@@ -9577,6 +9891,16 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
             choose_random(
                 "pecos_password_jump",
                 PECOS_PASSWORD_JOKE_MESSAGES,
+                usuario,
+            )
+        )
+        return True
+
+    if pecos_is_being_corrected(message.text):
+        await message.reply_text(
+            choose_random(
+                "pecos_correction",
+                get_humor_pool("correction"),
                 usuario,
             )
         )
@@ -9633,18 +9957,25 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
     # inventar información.
     if pecos_message_looks_like_question(message.text):
         await message.reply_text(
-            choose_random("pecos_question", PECOS_QUESTION_MESSAGES, usuario)
+            choose_random(
+                "pecos_unknown_question",
+                get_humor_pool("unknown"),
+                usuario,
+            )
         )
         return True
 
-    # Si solo lo nombran en una frase normal, responde ocasionalmente para no invadir.
-    if random.randint(1, 100) <= 35:
-        await message.reply_text(
-            choose_random("pecos_called", PECOS_CALLED_MESSAGES, usuario)
+    # Si alguien nombra directamente a Pecos y ninguna función anterior
+    # entendió la intención, Pecos YA NO se queda callado: responde siempre,
+    # pero reconoce que no tiene una respuesta segura en vez de inventarla.
+    await message.reply_text(
+        choose_random(
+            "pecos_unknown",
+            get_humor_pool("unknown"),
+            usuario,
         )
-        return True
-
-    return False
+    )
+    return True
 
 
 async def handle_contextual_phrase(message: Message) -> bool:
@@ -9813,6 +10144,26 @@ async def handle_special_daily_user_greeting(
     return True
 
 
+def user_is_first_observed_interaction(message: Message) -> bool:
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    # En el grupo principal, la memoria histórica es la señal más sólida.
+    if history_memory_enabled_for_chat(message.chat_id):
+        count = db.count_conversation_messages_for_user(message.chat_id, user.id)
+        # El mensaje actual ya fue aprendido antes de llegar a los saludos.
+        if count > 0:
+            return count <= 1
+
+    # Fallback para grupos sin memoria histórica: un perfil recién creado tiene
+    # first_seen == last_seen en su primera interacción observada.
+    row = db.get_user_profile(message.chat_id, user.id)
+    if not row:
+        return True
+    return str(row["first_seen"] or "") == str(row["last_seen"] or "")
+
+
 async def handle_collective_farewell(message: Message) -> bool:
     """
     Responde despedidas naturales dirigidas al grupo aunque Pecos no sea
@@ -9860,12 +10211,29 @@ async def handle_collective_farewell(message: Message) -> bool:
         or "a todos" in normalized
     )
 
-    # "Buenas noches" es ambigua: solo la tratamos como despedida colectiva
-    # cuando es breve y está dirigida claramente al grupo.
+    # "Buenas noches" es ambigua. Si el usuario recién está entrando o
+    # continúa presentándose/hablando, es SALUDO, no despedida.
+    introduction_signal = (
+        "tengo poco" in normalized
+        or "soy nuevo" in normalized
+        or "soy nueva" in normalized
+        or "recien entro" in normalized
+        or "recien ingres" in normalized
+        or "me presento" in normalized
+        or "ando empezando" in normalized
+        or "estoy empezando" in normalized
+        or "en el mundo de" in normalized
+        or "en este mundo" in normalized
+    )
+
+    first_interaction = user_is_first_observed_interaction(message)
+
     collective_good_night = (
         "buenas noches" in normalized
         and collective_target
         and short_message
+        and not introduction_signal
+        and not first_interaction
     )
 
     if not (explicit_farewell or collective_good_night):
@@ -9925,7 +10293,11 @@ async def handle_collective_greeting(message: Message) -> bool:
         or "para todo el grupo" in normalized
         or "a todos los presentes" in normalized
         or "para todos los presentes" in normalized
-        or bool(re.search(r"\b(hola|saludos|buenas)\s+(gente|amigos|grupo)\b", normalized))
+        or bool(re.search(
+            r"\b(?:hola|saludos|buenas(?:\s+noches|\s+tardes)?|buenos\s+dias|buen\s+dia)"
+            r"\s+(?:gente|amigos|grupo|colegas|companeros|muchachos|chicos|senores|caballeros)\b",
+            normalized,
+        ))
     )
 
     if not (greeting_signal and collective_signal):
@@ -10012,7 +10384,7 @@ async def handle_social(message: Message) -> bool:
 
     helpful_score = 0
     if message.from_user:
-        helpful_score = get_user_metric(message.chat_id, message.from_user.id, "helpful_score")
+        helpful_score = get_user_metric(message.chat_id, message.from_user.id, "file_contribution_score")
 
     if "buenos dias" in normalized or "buen dia" in normalized:
         increment_user_metric(message, "greeting_count")
@@ -10318,9 +10690,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # Asociación conocida modelo -> software. Puede intervenir aunque no
+        # nombren a Pecos si la consulta técnica es inequívoca.
+        if await handle_radio_software_association(message, context):
+            return
+
         # Las consultas técnicas dirigidas a Pecos tienen prioridad sobre las
-        # respuestas sociales genéricas. Esto permite frases cortas como
-        # "Pecos CPS MOTOTRBO?" sin exigir la palabra "busca".
+        # respuestas sociales genéricas. Ahora también tolera lenguaje coloquial
+        # alrededor de identificadores fuertes como KPG-D6.
         if await handle_archive_natural_query(message, context):
             return
 
