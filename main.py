@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.30-context-learning-foundation"
+VERSION = "2.8.31-autonomous-technical-memory"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -290,7 +290,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
-TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.2-strict-model-anchor"
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.3-autonomous-memory"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -1286,6 +1286,56 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_conv_qa_status
                 ON conversation_qa_pairs(chat_id, status);
+
+            -- Memoria técnica autónoma.
+            -- Es una capa derivada de conversaciones Q/A y NO modifica
+            -- file_fingerprints, SHA-256 ni la decisión de duplicados.
+            CREATE TABLE IF NOT EXISTS autonomous_technical_qa (
+                chat_id INTEGER NOT NULL,
+                question_message_id INTEGER NOT NULL,
+                answer_message_id INTEGER NOT NULL,
+                confirmation_message_id INTEGER NOT NULL DEFAULT 0,
+                question_text TEXT NOT NULL,
+                answer_text TEXT NOT NULL,
+                question_link TEXT NOT NULL DEFAULT '',
+                answer_link TEXT NOT NULL DEFAULT '',
+                model_anchors TEXT NOT NULL DEFAULT '',
+                keywords TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'GROUP_MEMORY',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, question_message_id, answer_message_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_autonomous_qa_status
+                ON autonomous_technical_qa(chat_id, status, confidence DESC);
+
+            CREATE TABLE IF NOT EXISTS autonomous_technical_facts (
+                chat_id INTEGER NOT NULL,
+                fact_type TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                qualifier TEXT NOT NULL DEFAULT '',
+                fact_value TEXT NOT NULL,
+                question_message_id INTEGER NOT NULL,
+                answer_message_id INTEGER NOT NULL,
+                confirmation_message_id INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'GROUP_MEMORY',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(
+                    chat_id, fact_type, subject, qualifier, fact_value,
+                    question_message_id, answer_message_id
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_autonomous_fact_subject
+                ON autonomous_technical_facts(
+                    chat_id, fact_type, subject, qualifier, status
+                );
             """
         )
 
@@ -1324,6 +1374,7 @@ class Database:
             "last_daily_sent_date": "",
             "silence_enabled": "1",
             "silence_hours": "8",
+            "autonomous_technical_memory_enabled": "1",
         }
         with self.lock:
             for key, value in defaults.items():
@@ -2593,6 +2644,253 @@ class Database:
                 params + [max(1, min(20, limit))],
             ).fetchall()
         return rows
+
+    def upsert_autonomous_qa(
+        self,
+        chat_id: int,
+        question_message_id: int,
+        answer_message_id: int,
+        confirmation_message_id: int,
+        question_text: str,
+        answer_text: str,
+        question_link: str,
+        answer_link: str,
+        model_anchors: list[str],
+        keywords: list[str],
+        status: str,
+        confidence: float,
+        source: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO autonomous_technical_qa(
+                    chat_id, question_message_id, answer_message_id,
+                    confirmation_message_id, question_text, answer_text,
+                    question_link, answer_link, model_anchors, keywords,
+                    status, confidence, source, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, question_message_id, answer_message_id)
+                DO UPDATE SET
+                    confirmation_message_id=excluded.confirmation_message_id,
+                    question_text=excluded.question_text,
+                    answer_text=excluded.answer_text,
+                    question_link=excluded.question_link,
+                    answer_link=excluded.answer_link,
+                    model_anchors=excluded.model_anchors,
+                    keywords=excluded.keywords,
+                    status=excluded.status,
+                    confidence=excluded.confidence,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    chat_id, question_message_id, answer_message_id,
+                    confirmation_message_id,
+                    question_text[:2000], answer_text[:3000],
+                    question_link[:600], answer_link[:600],
+                    "|".join(model_anchors[:8]),
+                    "|".join(keywords[:20]),
+                    status[:40],
+                    float(confidence),
+                    source[:80],
+                    now, now,
+                ),
+            )
+            self.conn.commit()
+
+    def upsert_autonomous_fact_evidence(
+        self,
+        chat_id: int,
+        fact_type: str,
+        subject: str,
+        qualifier: str,
+        fact_value: str,
+        question_message_id: int,
+        answer_message_id: int,
+        confirmation_message_id: int,
+        status: str,
+        confidence: float,
+        source: str,
+    ) -> None:
+        now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO autonomous_technical_facts(
+                    chat_id, fact_type, subject, qualifier, fact_value,
+                    question_message_id, answer_message_id,
+                    confirmation_message_id, status, confidence,
+                    source, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    chat_id, fact_type, subject, qualifier, fact_value,
+                    question_message_id, answer_message_id
+                )
+                DO UPDATE SET
+                    confirmation_message_id=excluded.confirmation_message_id,
+                    status=excluded.status,
+                    confidence=excluded.confidence,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    chat_id, fact_type[:60], subject[:120], qualifier[:80],
+                    fact_value[:160], question_message_id, answer_message_id,
+                    confirmation_message_id, status[:40], float(confidence),
+                    source[:80], now, now,
+                ),
+            )
+            self.conn.commit()
+
+    def list_autonomous_qa(
+        self,
+        chat_id: int,
+        statuses: tuple[str, ...] = ("CONFIRMED",),
+        limit: int = 5000,
+    ) -> list[sqlite3.Row]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self.lock:
+            return self.conn.execute(
+                f"""
+                SELECT *
+                FROM autonomous_technical_qa
+                WHERE chat_id = ?
+                  AND status IN ({placeholders})
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (chat_id, *statuses, max(1, min(10000, int(limit)))),
+            ).fetchall()
+
+    def grouped_autonomous_facts(
+        self,
+        chat_id: int,
+        fact_type: str,
+        subject: str,
+        qualifier: str = "",
+    ) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT
+                    fact_value,
+                    SUM(CASE WHEN status='CONFIRMED' THEN 1 ELSE 0 END)
+                        AS confirmed_count,
+                    SUM(CASE WHEN status='ACKNOWLEDGED' THEN 1 ELSE 0 END)
+                        AS acknowledged_count,
+                    COUNT(*) AS evidence_count,
+                    MAX(confidence) AS max_confidence,
+                    MAX(question_message_id) AS question_message_id,
+                    MAX(answer_message_id) AS answer_message_id,
+                    MAX(confirmation_message_id) AS confirmation_message_id
+                FROM autonomous_technical_facts
+                WHERE chat_id = ?
+                  AND fact_type = ?
+                  AND subject = ?
+                  AND (
+                        qualifier = ?
+                        OR qualifier = ''
+                      )
+                GROUP BY fact_value
+                ORDER BY confirmed_count DESC,
+                         acknowledged_count DESC,
+                         evidence_count DESC,
+                         max_confidence DESC
+                """,
+                (chat_id, fact_type, subject, qualifier),
+            ).fetchall()
+
+    def confirmed_or_ack_pairs_for_autonomous_sync(
+        self,
+        chat_id: int,
+    ) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT
+                    q.question_message_id,
+                    q.answer_message_id,
+                    q.confirmation_message_id,
+                    q.confidence,
+                    q.status,
+                    qm.text AS question_text,
+                    qm.message_link AS question_link,
+                    qm.sender_id AS question_sender_id,
+                    am.text AS answer_text,
+                    am.message_link AS answer_link,
+                    am.sender_id AS answer_sender_id
+                FROM conversation_qa_pairs q
+                JOIN conversation_messages qm
+                  ON qm.chat_id=q.chat_id
+                 AND qm.message_id=q.question_message_id
+                JOIN conversation_messages am
+                  ON am.chat_id=q.chat_id
+                 AND am.message_id=q.answer_message_id
+                WHERE q.chat_id = ?
+                  AND q.status IN ('CONFIRMED', 'ACKNOWLEDGED')
+                ORDER BY q.question_message_id, q.answer_message_id
+                """,
+                (chat_id,),
+            ).fetchall()
+
+    def autonomous_memory_stats(self, chat_id: int) -> dict[str, int]:
+        with self.lock:
+            qa_confirmed = int(self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM autonomous_technical_qa
+                WHERE chat_id=? AND status='CONFIRMED'
+                """,
+                (chat_id,),
+            ).fetchone()["n"])
+
+            qa_ack = int(self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM autonomous_technical_qa
+                WHERE chat_id=? AND status='ACKNOWLEDGED'
+                """,
+                (chat_id,),
+            ).fetchone()["n"])
+
+            fact_evidence = int(self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM autonomous_technical_facts
+                WHERE chat_id=?
+                """,
+                (chat_id,),
+            ).fetchone()["n"])
+
+            trusted_facts = int(self.conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM (
+                    SELECT fact_type, subject, qualifier, fact_value
+                    FROM autonomous_technical_facts
+                    WHERE chat_id=?
+                    GROUP BY fact_type, subject, qualifier, fact_value
+                    HAVING
+                        SUM(CASE WHEN status='CONFIRMED' THEN 1 ELSE 0 END) >= 1
+                        OR
+                        SUM(CASE WHEN status='ACKNOWLEDGED' THEN 1 ELSE 0 END) >= 2
+                )
+                """,
+                (chat_id,),
+            ).fetchone()["n"])
+
+        return {
+            "qa_confirmed": qa_confirmed,
+            "qa_acknowledged": qa_ack,
+            "fact_evidence": fact_evidence,
+            "trusted_facts": trusted_facts,
+        }
 
     def claim_silence_notice(self, chat_id: int, local_date: str) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
@@ -4455,7 +4753,7 @@ TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
     ("NX",  r"\bNX\s*(\d{3,4})\b"),
     ("NXR", r"\bNXR\s*(\d{3,4})\b"),
     ("TKR", r"\bTKR\s*(\d{3,4})\b"),
-    ("TK",  r"\bTK\s*(\d{3,4})\b"),
+    ("TK",  r"\bTK\s*(\d{3,4}[A-Z]?)\b"),
     ("TM",  r"\bTM\s*(\d{3,4}[A-Z]?)\b"),
     ("XTS", r"\bXTS\s*(\d{3,5})\b"),
     ("XTL", r"\bXTL\s*(\d{3,5})\b"),
@@ -4801,7 +5099,7 @@ TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("NX",  r"\bNX[-_ ]?(\d{3,4})\b"),
     ("NXR", r"\bNXR[-_ ]?(\d{3,4})\b"),
     ("TKR", r"\bTKR[-_ ]?(\d{3,4})\b"),
-    ("TK",  r"\bTK[-_ ]?(\d{3,4})\b"),
+    ("TK",  r"\bTK[-_ ]?(\d{3,4}[A-Z]?)\b"),
     ("TM",  r"\bTM[-_ ]?(\d{3,4}[A-Z]?)\b"),
     ("XTS", r"\bXTS[-_ ]?(\d{3,5})\b"),
     ("XTL", r"\bXTL[-_ ]?(\d{3,5})\b"),
@@ -6069,6 +6367,450 @@ def history_model_anchor(query: str) -> str:
     return ""
 
 
+
+AUTONOMOUS_MEMORY_SOURCE_CHAT_ID = HISTORY_SOURCE_CHAT_ID
+AUTONOMOUS_MEMORY_MIN_QA_CONFIDENCE = 0.95
+
+
+def autonomous_memory_enabled() -> bool:
+    return db.is_true("autonomous_technical_memory_enabled")
+
+
+def autonomous_canonical_model(value: str) -> str:
+    compact = re.sub(r"[^a-z0-9]", "", normalize_intent(value or ""))
+    match = re.fullmatch(r"([a-z]{2,6})(\d{3,5}[a-z]?)", compact)
+    if match:
+        return f"{match.group(1).upper()}-{match.group(2).upper()}"
+    return compact.upper()
+
+
+def autonomous_extract_model_anchors(text_value: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        canonical = autonomous_canonical_model(value)
+        if not canonical:
+            return
+        # KPG es software de programación, no el radio sujeto del hecho.
+        if canonical.startswith("KPG-"):
+            return
+        normalized = technical_term_normalized(canonical)
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        found.append(canonical)
+
+    for model in archive_model_terms(text_value):
+        add(model)
+
+    parsed = technical_query_interpret(text_value)
+    for model in list(parsed.get("models", [])):
+        add(str(model))
+    for model in list(parsed.get("raw_model_anchors", [])):
+        value = str(model)
+        if re.search(r"[A-Za-z]", value) and re.search(r"\d", value):
+            add(value)
+
+    return found[:8]
+
+
+def autonomous_extract_variant(text_value: str, model: str) -> str:
+    # En Kenwood aparecen variantes como K1/K2/K3. Solo se asocian cuando
+    # están explícitamente escritas para no inventar compatibilidades.
+    normalized = normalize_intent(text_value or "").upper()
+    if model.startswith(("TK-", "NX-", "NXR-", "TKR-", "TM-")):
+        match = re.search(r"\bK\s*([1-9])\b", normalized)
+        if match:
+            return f"K{match.group(1)}"
+    return ""
+
+
+def autonomous_extract_software_tokens(text_value: str) -> list[str]:
+    upper = technical_ascii_upper(text_value or "")
+    compact = technical_term_normalized(upper)
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip().upper()
+        if value and value not in found:
+            found.append(value)
+
+    # Kenwood: KPG-D6, KPG-169D, KPGD6, etc.
+    for match in re.finditer(
+        r"\bKPG[\s._-]*([A-Z]?\d+[A-Z]?)\b",
+        upper,
+    ):
+        add(f"KPG-{match.group(1)}")
+
+    # Software de familias con nombre inequívoco.
+    if "MOTOTRBO" in compact and "CPS" in compact:
+        add("MOTOTRBO CPS")
+    if "APX" in compact and "CPS" in compact:
+        add("APX CPS")
+
+    return found[:6]
+
+
+def autonomous_answer_has_technical_content(text_value: str) -> bool:
+    if autonomous_extract_software_tokens(text_value):
+        return True
+    if archive_model_terms(text_value):
+        return True
+    normalized = normalize_intent(text_value or "")
+    return any(re.search(pattern, normalized) for pattern in HISTORY_HELP_PATTERNS)
+
+
+def autonomous_learn_pair_row(row: sqlite3.Row) -> bool:
+    status = str(row["status"] or "").upper()
+    if status not in {"CONFIRMED", "ACKNOWLEDGED"}:
+        return False
+
+    question_text = str(row["question_text"] or "").strip()
+    answer_text = str(row["answer_text"] or "").strip()
+    if not question_text or not answer_text:
+        return False
+
+    # Evita que una persona se enseñe a sí misma como evidencia autónoma.
+    question_sender = int(row["question_sender_id"] or 0)
+    answer_sender = int(row["answer_sender_id"] or 0)
+    if question_sender and answer_sender and question_sender == answer_sender:
+        return False
+
+    anchors = autonomous_extract_model_anchors(question_text)
+    if not anchors:
+        return False
+
+    # Una respuesta demasiado corta y sin señal técnica no se memoriza.
+    if len(answer_text) < 8 and not autonomous_answer_has_technical_content(answer_text):
+        return False
+
+    confidence = float(row["confidence"] or 0.0)
+    if status == "CONFIRMED":
+        confidence = max(confidence, 0.99)
+    else:
+        confidence = max(confidence, 0.75)
+
+    question_id = int(row["question_message_id"] or 0)
+    answer_id = int(row["answer_message_id"] or 0)
+    confirmation_id = int(row["confirmation_message_id"] or 0)
+
+    # Keywords del problema, sin depender de un LLM externo.
+    keywords = history_extract_search_terms(question_text)
+
+    db.upsert_autonomous_qa(
+        AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+        question_id,
+        answer_id,
+        confirmation_id,
+        question_text,
+        answer_text,
+        str(row["question_link"] or ""),
+        str(row["answer_link"] or ""),
+        anchors,
+        keywords,
+        status,
+        confidence,
+        "GROUP_QA_AUTONOMOUS",
+    )
+
+    # Hecho estructurado modelo -> software.
+    # Se aprende automáticamente solo cuando hay UN modelo inequívoco y el
+    # software aparece explícitamente en la RESPUESTA.
+    softwares = autonomous_extract_software_tokens(answer_text)
+    if len(anchors) == 1 and softwares:
+        model = anchors[0]
+        variant = autonomous_extract_variant(question_text, model)
+
+        for software in softwares:
+            db.upsert_autonomous_fact_evidence(
+                AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+                "SOFTWARE_FOR_MODEL",
+                model,
+                variant,
+                software,
+                question_id,
+                answer_id,
+                confirmation_id,
+                status,
+                confidence,
+                "GROUP_QA_AUTONOMOUS",
+            )
+
+    return True
+
+
+def sync_autonomous_technical_memory(chat_id: int) -> dict[str, int]:
+    processed = 0
+    learned = 0
+    for row in db.confirmed_or_ack_pairs_for_autonomous_sync(chat_id):
+        processed += 1
+        if autonomous_learn_pair_row(row):
+            learned += 1
+
+    stats = db.autonomous_memory_stats(chat_id)
+    return {
+        "processed": processed,
+        "learned": learned,
+        **stats,
+    }
+
+
+def autonomous_memory_query_terms(text_value: str) -> set[str]:
+    anchors = {
+        technical_term_normalized(value)
+        for value in autonomous_extract_model_anchors(text_value)
+    }
+    terms = set(history_extract_search_terms(text_value))
+    return {
+        term
+        for term in terms
+        if technical_term_normalized(term) not in anchors
+    }
+
+
+def autonomous_find_confirmed_qa(text_value: str) -> sqlite3.Row | None:
+    query_anchors = autonomous_extract_model_anchors(text_value)
+    if not query_anchors:
+        # Por seguridad, la recuperación autónoma de una solución libre exige
+        # al menos un modelo concreto.
+        return None
+
+    query_anchor_norms = {
+        technical_term_normalized(value)
+        for value in query_anchors
+    }
+    query_terms = autonomous_memory_query_terms(text_value)
+    if not query_terms:
+        # "Pecos DGP8550e" por sí solo no es suficiente para elegir una
+        # solución histórica a un problema que el usuario no describió.
+        return None
+
+    ranked: list[tuple[float, sqlite3.Row]] = []
+
+    for row in db.list_autonomous_qa(
+        AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+        ("CONFIRMED",),
+    ):
+        confidence = float(row["confidence"] or 0.0)
+        if confidence < AUTONOMOUS_MEMORY_MIN_QA_CONFIDENCE:
+            continue
+
+        row_anchors = {
+            technical_term_normalized(value)
+            for value in str(row["model_anchors"] or "").split("|")
+            if value.strip()
+        }
+        if not (query_anchor_norms & row_anchors):
+            continue
+
+        row_terms = {
+            value.strip()
+            for value in str(row["keywords"] or "").split("|")
+            if value.strip()
+        }
+        overlap = query_terms & row_terms
+        if not overlap:
+            continue
+
+        score = 100.0 + (len(overlap) * 15.0) + (confidence * 10.0)
+        ranked.append((score, row))
+
+    if not ranked:
+        return None
+
+    ranked.sort(
+        key=lambda item: (
+            item[0],
+            float(item[1]["confidence"] or 0.0),
+            int(item[1]["question_message_id"] or 0),
+        ),
+        reverse=True,
+    )
+
+    # Si dos recuerdos distintos quedan prácticamente empatados, Pecos no
+    # elige arbitrariamente.
+    if len(ranked) > 1 and abs(ranked[0][0] - ranked[1][0]) < 5.0:
+        first_answer = normalize_intent(str(ranked[0][1]["answer_text"] or ""))
+        second_answer = normalize_intent(str(ranked[1][1]["answer_text"] or ""))
+        if first_answer != second_answer:
+            return None
+
+    return ranked[0][1]
+
+
+def autonomous_software_memory_for_query(
+    text_value: str,
+) -> tuple[str, str, list[sqlite3.Row]] | None:
+    if not radio_software_request_signal(text_value):
+        return None
+
+    models = autonomous_extract_model_anchors(text_value)
+    if len(models) != 1:
+        return None
+
+    model = models[0]
+    variant = autonomous_extract_variant(text_value, model)
+    rows = db.grouped_autonomous_facts(
+        AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+        "SOFTWARE_FOR_MODEL",
+        model,
+        variant,
+    )
+    if not rows:
+        return None
+
+    trusted: list[sqlite3.Row] = []
+    for row in rows:
+        confirmed = int(row["confirmed_count"] or 0)
+        acknowledged = int(row["acknowledged_count"] or 0)
+        # Regla de confianza:
+        # - una confirmación explícita del autor original basta, o
+        # - dos conversaciones ACKNOWLEDGED independientes forman consenso.
+        if confirmed >= 1 or acknowledged >= 2:
+            trusted.append(row)
+
+    if not trusted:
+        return None
+
+    # Si la memoria confiable contiene más de un software distinto para el
+    # mismo modelo/variante, no se decide automáticamente.
+    distinct_values = {
+        str(row["fact_value"] or "").strip().upper()
+        for row in trusted
+        if str(row["fact_value"] or "").strip()
+    }
+    if len(distinct_values) != 1:
+        return model, variant, trusted
+
+    return model, variant, trusted
+
+
+async def handle_autonomous_technical_memory(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not autonomous_memory_enabled():
+        return False
+
+    text_value = (message.text or message.caption or "").strip()
+    if not text_value:
+        return False
+
+    # 1) Memoria estructurada modelo -> software.
+    structured = autonomous_software_memory_for_query(text_value)
+    if structured:
+        model, variant, rows = structured
+        usuario = display_name(message)
+
+        values = {
+            str(row["fact_value"] or "").strip().upper()
+            for row in rows
+            if str(row["fact_value"] or "").strip()
+        }
+
+        if len(values) != 1:
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=(
+                    f"🧠 {usuario}, Pecos encontró recuerdos técnicos confiables "
+                    f"pero contradictorios para {model}"
+                    f"{(' ' + variant) if variant else ''}. "
+                    "No voy a elegir un software al azar; esto necesita revisión."
+                ),
+            )
+            return True
+
+        software = next(iter(values))
+        best = rows[0]
+        confirmed = int(best["confirmed_count"] or 0)
+        acknowledged = int(best["acknowledged_count"] or 0)
+
+        if confirmed >= 1:
+            basis = "una solución confirmada por el usuario que hizo la consulta"
+        else:
+            basis = "dos o más conversaciones coincidentes del grupo"
+
+        lines = [
+            f"🧠 {usuario}, Pecos aprendió esto de la memoria técnica del grupo:",
+            f"📻 {model}{(' ' + variant) if variant else ''} → 💻 {software}",
+            f"✅ Base: {basis}.",
+        ]
+
+        # Intenta ubicar el software en el archivo REAL del grupo fuente.
+        archive_rows = search_archive_rows(
+            AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+            software,
+            limit=3,
+        )
+        if archive_rows:
+            lines.append("📦 También encontré el software en los archivos:")
+            source_chat = message.chat
+            if message.chat_id != AUTONOMOUS_MEMORY_SOURCE_CHAT_ID:
+                # El enlace se genera con el chat fuente histórico.
+                class _SourceChat:
+                    id = AUTONOMOUS_MEMORY_SOURCE_CHAT_ID
+                    username = None
+                source_chat = _SourceChat()
+            lines.extend(archive_result_lines(source_chat, archive_rows, max_items=3))
+
+        qid = int(best["question_message_id"] or 0)
+        aid = int(best["answer_message_id"] or 0)
+        qrow = db.get_conversation_message(AUTONOMOUS_MEMORY_SOURCE_CHAT_ID, qid)
+        arow = db.get_conversation_message(AUTONOMOUS_MEMORY_SOURCE_CHAT_ID, aid)
+        if qrow and str(qrow["message_link"] or ""):
+            lines.append(f"🔗 Caso original: {qrow['message_link']}")
+        if arow and str(arow["message_link"] or ""):
+            lines.append(f"🔗 Respuesta: {arow['message_link']}")
+
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text="\n".join(lines),
+        )
+        db.add_history(
+            f"MEMORIA AUTONOMA SOFTWARE | {model} {variant} -> {software} | "
+            f"consulta={message.message_id} | usuario={usuario}"
+        )
+        return True
+
+    # 2) Solución técnica libre, pero SOLO si el caso histórico está CONFIRMED.
+    if not (
+        text_mentions_pecos(text_value)
+        or looks_like_question(text_value)
+        or radio_software_request_signal(text_value)
+        or any(re.search(p, normalize_intent(text_value)) for p in HISTORY_REQUEST_PATTERNS)
+    ):
+        return False
+
+    row = autonomous_find_confirmed_qa(text_value)
+    if row is None:
+        return False
+
+    usuario = display_name(message)
+    answer_text = " ".join(str(row["answer_text"] or "").split())
+    if len(answer_text) > 700:
+        answer_text = answer_text[:697] + "..."
+
+    lines = [
+        f"🧠 {usuario}, Pecos recuerda un caso confirmado del grupo que coincide con tu consulta.",
+        f"💡 Solución que quedó confirmada: {answer_text}",
+    ]
+    if str(row["question_link"] or ""):
+        lines.append(f"🔗 Consulta original: {row['question_link']}")
+    if str(row["answer_link"] or ""):
+        lines.append(f"🔗 Respuesta original: {row['answer_link']}")
+
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        text="\n".join(lines),
+    )
+    db.add_history(
+        f"MEMORIA AUTONOMA QA | origen={row['question_message_id']}/{row['answer_message_id']} "
+        f"| consulta={message.message_id} | usuario={usuario}"
+    )
+    return True
+
+
 def history_message_media_type(message: Message) -> str:
     if message.document:
         return "document"
@@ -6215,6 +6957,27 @@ async def learn_historical_memory(
                     status,
                     f"aprendizaje_continuo: autor_original_{status.lower()}",
                 )
+
+                # La memoria técnica autónoma aprende inmediatamente cuando el
+                # autor original confirma o agradece una respuesta. Las
+                # respuestas ACKNOWLEDGED se guardan como evidencia, pero solo
+                # dos coincidentes pueden formar consenso automático.
+                if autonomous_memory_enabled():
+                    refreshed_pair = None
+                    for candidate in db.confirmed_or_ack_pairs_for_autonomous_sync(
+                        message.chat_id
+                    ):
+                        if (
+                            int(candidate["question_message_id"] or 0)
+                            == int(pair["question_message_id"])
+                            and int(candidate["answer_message_id"] or 0)
+                            == int(pair["answer_message_id"])
+                        ):
+                            refreshed_pair = candidate
+                            break
+                    if refreshed_pair is not None:
+                        autonomous_learn_pair_row(refreshed_pair)
+
                 if status == "CONFIRMED":
                     answer_cls = db.get_conversation_classification(
                         message.chat_id,
@@ -7838,6 +8601,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         statuses = stats["statuses"]
         group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
 
+        auto_stats = db.autonomous_memory_stats(HISTORY_SOURCE_CHAT_ID)
+
         memory_text = (
             f"🧠 Memoria de Pecos — {group_title}\n\n"
             f"Mensajes almacenados: {stats['messages']:,}\n"
@@ -7848,8 +8613,13 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Respuestas rechazadas: {statuses.get('REJECTED', 0):,}\n"
             f"Pendientes/probables: {statuses.get('PROBABLE', 0):,}\n"
             f"Fingerprints del grupo: {stats['fingerprints']:,}\n\n"
+            f"🤖 Memoria técnica autónoma\n"
+            f"Q/A confirmados aprendidos: {auto_stats['qa_confirmed']:,}\n"
+            f"Q/A agradecidos como evidencia: {auto_stats['qa_acknowledged']:,}\n"
+            f"Evidencias estructuradas: {auto_stats['fact_evidence']:,}\n"
+            f"Hechos confiables: {auto_stats['trusted_facts']:,}\n\n"
             f"Grupo fuente: {HISTORY_SOURCE_CHAT_ID}\n"
-            "Estado: ✅ Memoria histórica activa"
+            "Estado: ✅ Memoria histórica + aprendizaje autónomo activos"
         )
         await query.message.reply_text(memory_text)
         return
@@ -7858,6 +8628,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         PENDING_ADMIN_ACTION.pop(user_id, None)
         unique_count, hash_count = db.duplicate_counts()
         stats = db.admin_memory_stats(HISTORY_SOURCE_CHAT_ID)
+        auto_stats = db.autonomous_memory_stats(HISTORY_SOURCE_CHAT_ID)
 
         try:
             db_size_mb = DB_PATH.stat().st_size / (1024 * 1024)
@@ -7876,6 +8647,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Grupos autorizados: {len(ALLOWED_GROUP_IDS)}\n"
             f"Administradores Pecos: {len(ADMIN_USER_IDS)}\n"
             f"Memoria histórica: ✅ Activa\n"
+            f"Memoria técnica autónoma: {'✅ Activa' if autonomous_memory_enabled() else '❌ Desactivada'}\n"
+            f"Q/A técnicos aprendidos: {auto_stats['qa_confirmed']:,}\n"
+            f"Hechos técnicos confiables: {auto_stats['trusted_facts']:,}\n"
             f"Mensajes históricos: {stats['messages']:,}\n"
             f"Autores observados: {stats['users']:,}\n"
             f"FileUniqueId registrados: {unique_count:,}\n"
@@ -10655,13 +11429,21 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_xerax_fun(message):
             return
 
-    # Fase 2: aprende respuestas explícitas a preguntas ya registradas y
-    # reconoce consultas muy parecidas sin borrar el mensaje del usuario.
+    # Fase 2: aprende respuestas explícitas a preguntas ya registradas.
+    # Antes de limitarse a decir "esto ya se preguntó", Pecos intenta usar
+    # asociaciones confirmadas y su memoria técnica autónoma.
     if (
         not is_edited
         and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     ):
         await capture_answer_to_known_question(message, context)
+
+        if await handle_radio_software_association(message, context):
+            return
+
+        if await handle_autonomous_technical_memory(message, context):
+            return
+
         if await handle_repeated_question(message, context):
             return
 
@@ -10690,14 +11472,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        # Asociación conocida modelo -> software. Puede intervenir aunque no
-        # nombren a Pecos si la consulta técnica es inequívoca.
-        if await handle_radio_software_association(message, context):
-            return
-
-        # Las consultas técnicas dirigidas a Pecos tienen prioridad sobre las
-        # respuestas sociales genéricas. Ahora también tolera lenguaje coloquial
-        # alrededor de identificadores fuertes como KPG-D6.
+        # Si la memoria técnica no resolvió el caso, Pecos aún puede buscar
+        # archivos por referencias explícitas como KPG-D6.
         if await handle_archive_natural_query(message, context):
             return
 
@@ -10939,6 +11715,28 @@ async def post_init(application: Application) -> None:
                 catalog_chat_id,
                 exc,
             )
+
+    # Reconstrucción idempotente de la memoria técnica autónoma a partir de
+    # pares históricos CONFIRMED/ACKNOWLEDGED. No modifica mensajes históricos,
+    # fingerprints ni SHA-256.
+    if autonomous_memory_enabled():
+        try:
+            auto_stats = sync_autonomous_technical_memory(
+                AUTONOMOUS_MEMORY_SOURCE_CHAT_ID
+            )
+            log.info(
+                "Memoria técnica autónoma sincronizada | chat=%s | pares_revisados=%s "
+                "| qa_aprendidos=%s | qa_confirmados=%s | evidencias=%s "
+                "| hechos_confiables=%s",
+                AUTONOMOUS_MEMORY_SOURCE_CHAT_ID,
+                auto_stats["processed"],
+                auto_stats["learned"],
+                auto_stats["qa_confirmed"],
+                auto_stats["fact_evidence"],
+                auto_stats["trusted_facts"],
+            )
+        except Exception as exc:
+            log.warning("Memoria técnica autónoma: fallo de sincronización: %s", exc)
 
     log.info(
         "Duplicados: Bot API local + SHA-256 | temporales=%s",
