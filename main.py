@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.33-math-battle"
+VERSION = "2.8.34-kpg-family-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -5524,6 +5524,60 @@ def technical_catalog_row_matches_strict_anchor(
     return False
 
 
+
+def technical_kpg_numeric_family_root(value: str) -> str | None:
+    """Devuelve la raíz compacta solo para consultas KPG + número puro.
+
+    Ejemplos:
+      KPG-141 -> KPG141
+      KPG 141 -> KPG141 (ya llega canonizado normalmente)
+      KPG-141D -> None  (si el usuario especificó la letra, se mantiene exacto)
+      KPG-D6   -> None  (identificador alfanumérico específico)
+    """
+    compact = technical_term_normalized(value)
+    match = re.fullmatch(r"KPG(\d+)", compact)
+    if not match:
+        return None
+    return f"KPG{match.group(1)}"
+
+
+def technical_catalog_row_matches_kpg_numeric_family(
+    row: sqlite3.Row,
+    requested: str,
+) -> bool:
+    """Coincidencia controlada de una familia KPG numérica.
+
+    Si el usuario pide KPG-141, acepta variantes que conservan exactamente
+    el mismo número y solo agregan letras al final:
+      KPG-141
+      KPG-141D
+      KPG-141N
+      KPG-141DN
+
+    Rechaza:
+      KPG-1410
+      KPG-1412D
+      KPG-14
+    """
+    root = technical_kpg_numeric_family_root(requested)
+    if not root:
+        return False
+
+    # 1) Metadato estructurado de software.
+    for part in str(row["software"] or "").split("|"):
+        candidate = technical_term_normalized(part.strip())
+        if candidate and re.fullmatch(rf"{re.escape(root)}[A-Z]*", candidate):
+            return True
+
+    # 2) Nombre real del archivo. archive_name_matches_anchor ya conserva
+    #    el número solicitado y permite únicamente sufijos alfabéticos.
+    file_name = str(row["file_name"] or "")
+    if archive_name_matches_anchor(file_name, requested):
+        return True
+
+    return False
+
+
 def technical_catalog_field_has(row: sqlite3.Row, field: str, wanted: str) -> bool:
     normalized = technical_term_normalized(wanted)
     return any(
@@ -5627,6 +5681,8 @@ def technical_catalog_search_rows(
       - una consulta amplia ("Hytera") puede devolver archivos generales;
       - una consulta con modelo/identificador ("Hytera MD616", "Hytera 626")
         SOLO devuelve archivos que satisfacen ese destino;
+      - KPG + número puro ("KPG 141") admite variantes alfabéticas del mismo
+        número ("KPG-141D"), pero nunca cambia el número solicitado;
       - si el destino no existe, devuelve [] y NO rellena con archivos de marca.
     """
     parsed = technical_query_interpret(query)
@@ -5659,26 +5715,52 @@ def technical_catalog_search_rows(
         # Modelos que el catálogo conoce de forma canónica.
         for model in models:
             requirements = list(base)
-            if model.startswith("KPG-"):
-                requirements.append(("SOFTWARE", model))
-            else:
-                requirements.append(("MODEL", model))
 
-            rows = technical_catalog_fetch_exact(chat_id, requirements)
+            kpg_numeric_family = technical_kpg_numeric_family_root(model)
 
-            # Fallback controlado ya existente: CPS + modelo concreto.
-            # Solo quita la etiqueta CPS, NUNCA quita el modelo.
-            if not rows and ("RESOURCE", "CPS") in requirements:
-                fallback_requirements = [
-                    item for item in requirements
-                    if item != ("RESOURCE", "CPS")
+            if kpg_numeric_family:
+                # Regla KPG numérica:
+                # "KPG 141" significa "cualquier variante KPG-141 con
+                # sufijo alfabético", por ejemplo KPG-141D.
+                #
+                # NO degradamos a "cualquier KPG": primero respetamos todos
+                # los filtros base y después exigimos la misma raíz numérica.
+                rows = technical_catalog_fetch_candidates(chat_id, base)
+                rows = [
+                    row
+                    for row in rows
+                    if technical_catalog_row_matches_kpg_numeric_family(row, model)
                 ]
-                rows = technical_catalog_fetch_exact(chat_id, fallback_requirements)
-                if rows:
-                    requirements = fallback_requirements
+            else:
+                if model.startswith("KPG-"):
+                    requirements.append(("SOFTWARE", model))
+                else:
+                    requirements.append(("MODEL", model))
+
+                rows = technical_catalog_fetch_exact(chat_id, requirements)
+
+                # Fallback controlado ya existente: CPS + modelo concreto.
+                # Solo quita la etiqueta CPS, NUNCA quita el modelo.
+                if not rows and ("RESOURCE", "CPS") in requirements:
+                    fallback_requirements = [
+                        item for item in requirements
+                        if item != ("RESOURCE", "CPS")
+                    ]
+                    rows = technical_catalog_fetch_exact(chat_id, fallback_requirements)
+                    if rows:
+                        requirements = fallback_requirements
 
             ranked = [
-                (technical_catalog_rank(row, query, requirements), row)
+                (
+                    technical_catalog_rank(row, query, requirements)
+                    + (
+                        120.0
+                        if kpg_numeric_family
+                        and technical_catalog_row_matches_kpg_numeric_family(row, model)
+                        else 0.0
+                    ),
+                    row,
+                )
                 for row in rows
                 if technical_file_allowed(str(row["file_name"] or ""))
             ]
