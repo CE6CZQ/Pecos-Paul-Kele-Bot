@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.32-telegram-time-date"
+VERSION = "2.8.33-math-battle"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -659,6 +659,46 @@ MATH_DAILY_LIMIT_MESSAGES = [
 ]
 
 MATH_DAILY_EVENT_KEY = "math_calculation"
+
+# Guerra matemática: minijuego separado del límite de un cálculo diario.
+# Se ofrece solo después de 3 preguntas dirigidas a Pecos que terminaron
+# en el fallback "no sé / fuera de alcance" dentro de 10 minutos.
+MATH_BATTLE_TRIGGER_COUNT = 3
+MATH_BATTLE_TRIGGER_WINDOW_SECONDS = 10 * 60
+MATH_BATTLE_ACCEPT_WINDOW_SECONDS = 2 * 60
+MATH_BATTLE_OFFER_COOLDOWN_SECONDS = 30 * 60
+MATH_BATTLE_TOTAL_ROUNDS = 5
+MATH_BATTLE_ROUNDS = (
+    ("Fácil", 5),
+    ("Fácil", 5),
+    ("Media", 7),
+    ("Media", 7),
+    ("Difícil", 10),
+)
+
+MATH_BATTLE_OFFER_MESSAGES = [
+    "🤠 Partner… ya van varias preguntas que tienen a Pecos mirando el horizonte. Hagamos algo más productivo: te desafío a una guerra matemática. 🧮 5 rondas, cálculo mental y sin calculadora. ¿Aceptas?",
+    "🌵 Ya van varias, {usuario}. Pecos propone resolver esto como caballeros del lejano oeste: ⚔️ guerra matemática, 5 rondas y cálculo mental. ¿Aceptas?",
+    "😎 {usuario}, antes de que sigamos interrogando al pobre sheriff, Pecos te lanza un desafío: 5 rondas de cálculo mental. ¿Te atreves?",
+]
+
+MATH_BATTLE_WIN_MESSAGES = [
+    "🏆 {usuario} gana {user_score}-{pecos_score}. Está bien… Pecos reconoce la derrota. Pero que quede entre nosotros, tengo una reputación que mantener. 🌵",
+    "🏆 Victoria humana: {user_score}-{pecos_score}. Muy bien, {usuario}. Pecos se quita el sombrero… por esta vez. 🤠",
+]
+
+MATH_BATTLE_PECOS_WIN_MESSAGES = [
+    "🏆 Pecos gana {pecos_score}-{user_score}. Buen intento, {usuario}. Volvamos a los radios antes de que esto se convierta en una olimpiada matemática. 🤠",
+    "😎 Resultado final: Pecos {pecos_score} — {usuario} {user_score}. Partner, hoy los circuitos estuvieron más rápidos que las neuronas.",
+]
+
+# Estado efímero del minijuego. Si el bot reinicia, simplemente se cancela la
+# partida en curso; no se toca ninguna tabla histórica ni el catálogo técnico.
+MATH_BATTLE_UNKNOWN_TIMES: dict[tuple[int, int], list[float]] = {}
+MATH_BATTLE_PENDING: dict[tuple[int, int], dict] = {}
+MATH_BATTLE_ACTIVE: dict[tuple[int, int], dict] = {}
+MATH_BATTLE_COOLDOWN_UNTIL: dict[tuple[int, int], float] = {}
+
 MATH_MAX_EXPRESSION_LENGTH = 120
 MATH_MAX_AST_NODES = 50
 MATH_MAX_ABS_LITERAL = 1_000_000_000_000
@@ -10482,6 +10522,426 @@ def _pretty_math_expression(display_expression: str) -> str:
     return text_value
 
 
+def _math_battle_key(message: Message) -> tuple[int, int] | None:
+    user = message.from_user
+    if not user or user.is_bot:
+        return None
+    return (int(message.chat_id), int(user.id))
+
+
+def _math_battle_normalized_reply(text_value: str) -> str:
+    normalized = normalize_intent(text_value or "").strip().lower()
+    normalized = re.sub(r"^\s*(?:pecos|peco)\b[\s,:;-]*", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" .,!¡¿?")
+    return normalized
+
+
+def _math_battle_accepts(text_value: str) -> bool:
+    value = _math_battle_normalized_reply(text_value)
+    accepted = {
+        "acepto", "aceptado", "desafio aceptado", "reto aceptado",
+        "dale", "vamos", "venga", "ok", "okay", "bueno", "ya",
+        "si", "sí", "de una", "hagamoslo", "hagámoslo",
+    }
+    return value in accepted or value.startswith("acepto ")
+
+
+def _math_battle_declines(text_value: str) -> bool:
+    value = _math_battle_normalized_reply(text_value)
+    declined = {
+        "no", "paso", "no gracias", "otro dia", "otro día",
+        "despues", "después", "no acepto", "me retiro", "cancelar",
+    }
+    return value in declined
+
+
+def _math_battle_cancel_task(state: dict) -> None:
+    task = state.get("timeout_task")
+    if task and not task.done():
+        task.cancel()
+    state["timeout_task"] = None
+
+
+def _math_battle_generate_question(difficulty: str) -> tuple[str, int]:
+    """Genera cuentas enteras aptas para cálculo mental y las valida con el
+    mismo evaluador matemático seguro de Pecos.
+    """
+    for _ in range(100):
+        if difficulty == "Fácil":
+            a = random.randint(4, 12)
+            b = random.randint(3, 12)
+            c = random.randint(3, 28)
+            if random.choice((True, False)):
+                expression = f"{a}*{b}+{c}"
+            else:
+                product = a * b
+                c = min(c, max(1, product - 1))
+                expression = f"{a}*{b}-{c}"
+
+        elif difficulty == "Media":
+            a = random.randint(8, 25)
+            b = random.randint(3, 14)
+            c = random.randint(3, 9)
+            d = random.randint(5, 35)
+            if random.choice((True, False)):
+                expression = f"({a}+{b})*{c}-{d}"
+            else:
+                # Mantener el paréntesis positivo para cálculo mental limpio.
+                if b >= a:
+                    a, b = b + random.randint(3, 8), a
+                expression = f"({a}-{b})*{c}+{d}"
+
+        else:  # Difícil
+            mode = random.randint(1, 3)
+            if mode == 1:
+                a = random.randint(11, 28)
+                b = random.randint(4, 12)
+                c = random.randint(3, 9)
+                d = random.randint(3, 8)
+                e = random.randint(5, 30)
+                expression = f"({a}+{b})*{c}-{d}*{e}"
+            elif mode == 2:
+                a = random.randint(8, 18)
+                b = random.randint(10, 24)
+                c = random.randint(3, 9)
+                d = random.randint(3, 9)
+                e = random.randint(2, 8)
+                q = random.randint(3, 14)
+                expression = f"{a}*({b}-{c})+{q*e}/{e}"
+            else:
+                a = random.randint(8, 16)
+                b = random.randint(6, 13)
+                c = random.randint(4, 11)
+                d = random.randint(3, 9)
+                e = random.randint(5, 25)
+                expression = f"{a}*{b}-{c}*{d}+{e}"
+
+        try:
+            result = _safe_math_eval(expression)
+        except SafeMathError:
+            continue
+
+        if isinstance(result, float) and not float(result).is_integer():
+            continue
+
+        answer = int(result)
+        # Evitar resultados negativos o absurdamente altos para este juego.
+        if 0 <= answer <= 1500:
+            return _pretty_math_expression(expression), answer
+
+    # Fallback prácticamente inalcanzable.
+    return "12 × 8 - 16", 80
+
+
+def _math_battle_parse_answer(text_value: str) -> float | None:
+    value = _math_battle_normalized_reply(text_value)
+    match = re.fullmatch(
+        r"(?:(?:es|da|resultado)\s+)?([+-]?\d+(?:[.,]\d+)?)",
+        value,
+    )
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _math_battle_is_surrender(text_value: str) -> bool:
+    value = _math_battle_normalized_reply(text_value)
+    return value in {
+        "no se", "no sé", "paso", "me rindo", "rindo", "ni idea",
+    }
+
+
+async def _math_battle_finish(bot, key: tuple[int, int]) -> None:
+    state = MATH_BATTLE_ACTIVE.pop(key, None)
+    if not state:
+        return
+
+    _math_battle_cancel_task(state)
+    user_score = int(state.get("user_score", 0))
+    pecos_score = int(state.get("pecos_score", 0))
+    usuario = str(state.get("usuario") or "partner")
+
+    if user_score > pecos_score:
+        template = random.choice(MATH_BATTLE_WIN_MESSAGES)
+    elif pecos_score > user_score:
+        template = random.choice(MATH_BATTLE_PECOS_WIN_MESSAGES)
+    else:
+        template = (
+            "⚔️ Empate {user_score}-{pecos_score}. Pecos propone dejarlo así "
+            "antes de que alguien pida VAR matemático. 😂"
+        )
+
+    await bot.send_message(
+        chat_id=key[0],
+        text=template.format(
+            usuario=usuario,
+            user_score=user_score,
+            pecos_score=pecos_score,
+        ),
+    )
+    db.add_history(
+        f"GUERRA MATEMATICA FINAL | {usuario} | chat {key[0]} | "
+        f"usuario={user_score} pecos={pecos_score}"
+    )
+
+
+async def _math_battle_ask_round(bot, key: tuple[int, int]) -> None:
+    state = MATH_BATTLE_ACTIVE.get(key)
+    if not state:
+        return
+
+    round_index = int(state.get("round_index", 0))
+    if round_index >= MATH_BATTLE_TOTAL_ROUNDS:
+        await _math_battle_finish(bot, key)
+        return
+
+    difficulty, seconds = MATH_BATTLE_ROUNDS[round_index]
+    expression, answer = _math_battle_generate_question(difficulty)
+
+    # Token monotónico para impedir que un timeout antiguo afecte una ronda nueva.
+    state["round_serial"] = int(state.get("round_serial", 0)) + 1
+    serial = state["round_serial"]
+    state["difficulty"] = difficulty
+    state["time_limit"] = seconds
+    state["expression"] = expression
+    state["answer"] = answer
+    state["awaiting_answer"] = False
+
+    icon = "🟢" if difficulty == "Fácil" else "🟡" if difficulty == "Media" else "🔴"
+    await bot.send_message(
+        chat_id=key[0],
+        text=(
+            f"⚔️ Guerra matemática — Ronda {round_index + 1}/{MATH_BATTLE_TOTAL_ROUNDS}\n"
+            f"{icon} {difficulty} | ⏱️ {seconds} segundos\n"
+            f"🧮 ¿Cuánto es {expression}?\n"
+            "Sin calculadora, partner."
+        ),
+    )
+
+    sent_at = time.monotonic()
+    state["sent_at"] = sent_at
+    state["awaiting_answer"] = True
+    state["timeout_task"] = asyncio.create_task(
+        _math_battle_timeout(bot, key, round_index, serial, seconds)
+    )
+
+
+async def _math_battle_timeout(
+    bot,
+    key: tuple[int, int],
+    round_index: int,
+    serial: int,
+    seconds: int,
+) -> None:
+    try:
+        await asyncio.sleep(seconds)
+    except asyncio.CancelledError:
+        return
+
+    state = MATH_BATTLE_ACTIVE.get(key)
+    if not state:
+        return
+    if int(state.get("round_index", -1)) != round_index:
+        return
+    if int(state.get("round_serial", -1)) != serial:
+        return
+    if not state.get("awaiting_answer"):
+        return
+
+    state["awaiting_answer"] = False
+    state["timeout_task"] = None
+    state["pecos_score"] = int(state.get("pecos_score", 0)) + 1
+
+    await bot.send_message(
+        chat_id=key[0],
+        text=(
+            f"⏱️ Tiempo, partner. Punto para Pecos. 🤠\n"
+            f"Resultado correcto: {state['answer']}.\n"
+            f"Marcador: {state['usuario']} {state['user_score']} — "
+            f"Pecos {state['pecos_score']}"
+        ),
+    )
+
+    state["round_index"] = round_index + 1
+    await asyncio.sleep(0.8)
+    await _math_battle_ask_round(bot, key)
+
+
+async def _math_battle_start(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    key = _math_battle_key(message)
+    if key is None:
+        return
+
+    MATH_BATTLE_PENDING.pop(key, None)
+    MATH_BATTLE_UNKNOWN_TIMES.pop(key, None)
+
+    MATH_BATTLE_ACTIVE[key] = {
+        "usuario": display_name(message),
+        "round_index": 0,
+        "round_serial": 0,
+        "user_score": 0,
+        "pecos_score": 0,
+        "awaiting_answer": False,
+        "timeout_task": None,
+    }
+
+    await message.reply_text(
+        "⚔️ Desafío aceptado. Son 5 rondas: Fácil 5 s, Media 7 s y Difícil 10 s. "
+        "El punto es tuyo si respondes correcto dentro del tiempo; si fallas o se acaba el reloj, es para Pecos. 🤠"
+    )
+    await asyncio.sleep(0.5)
+    await _math_battle_ask_round(context.bot, key)
+
+
+async def handle_math_battle_message(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Gestiona aceptación, respuestas y cancelación de una guerra matemática."""
+    key = _math_battle_key(message)
+    if key is None:
+        return False
+
+    text_value = message.text or message.caption or ""
+    now = time.monotonic()
+
+    state = MATH_BATTLE_ACTIVE.get(key)
+    if state:
+        normalized = _math_battle_normalized_reply(text_value)
+        if normalized in {"cancelar", "terminar", "fin", "me retiro", "abandono"}:
+            _math_battle_cancel_task(state)
+            MATH_BATTLE_ACTIVE.pop(key, None)
+            await message.reply_text(
+                "🏳️ Guerra matemática terminada. Pecos guarda el ábaco y volvemos a los radios. 🤠"
+            )
+            return True
+
+        if not state.get("awaiting_answer"):
+            return False
+
+        parsed = _math_battle_parse_answer(text_value)
+        surrendered = _math_battle_is_surrender(text_value)
+        if parsed is None and not surrendered:
+            return False
+
+        _math_battle_cancel_task(state)
+        state["awaiting_answer"] = False
+
+        elapsed = max(0.0, now - float(state.get("sent_at", now)))
+        limit = float(state.get("time_limit", 0))
+        correct = (parsed is not None and abs(parsed - float(state["answer"])) < 1e-9)
+        round_index = int(state.get("round_index", 0))
+
+        if elapsed > limit:
+            state["pecos_score"] = int(state.get("pecos_score", 0)) + 1
+            if correct:
+                result_text = (
+                    f"😏 Correcto… pero fuera de tiempo ({elapsed:.1f} s). "
+                    "Eso huele a calculadora, partner. Punto para Pecos."
+                )
+            else:
+                result_text = (
+                    f"⏱️ Llegó después del límite de {int(limit)} s. "
+                    f"Punto para Pecos. Resultado: {state['answer']}."
+                )
+        elif correct:
+            state["user_score"] = int(state.get("user_score", 0)) + 1
+            result_text = (
+                f"✅ Correcto en {elapsed:.1f} s. Punto para {state['usuario']}. "
+                "No te emociones, partner. 😎"
+            )
+        else:
+            state["pecos_score"] = int(state.get("pecos_score", 0)) + 1
+            if surrendered:
+                result_text = (
+                    f"🏳️ Pasas la ronda. Punto para Pecos. Resultado correcto: {state['answer']}."
+                )
+            else:
+                result_text = (
+                    f"❌ No, partner. El resultado era {state['answer']}. Punto para Pecos. 🤠"
+                )
+
+        await message.reply_text(
+            result_text
+            + "\n"
+            + f"Marcador: {state['usuario']} {state['user_score']} — Pecos {state['pecos_score']}"
+        )
+
+        state["round_index"] = round_index + 1
+        await asyncio.sleep(0.8)
+        await _math_battle_ask_round(context.bot, key)
+        return True
+
+    pending = MATH_BATTLE_PENDING.get(key)
+    if pending:
+        if now > float(pending.get("expires_at", 0)):
+            MATH_BATTLE_PENDING.pop(key, None)
+            return False
+
+        if _math_battle_accepts(text_value):
+            await _math_battle_start(message, context)
+            return True
+
+        if _math_battle_declines(text_value):
+            MATH_BATTLE_PENDING.pop(key, None)
+            await message.reply_text(
+                "🤠 Trato hecho. Pecos guarda el desafío y volvemos al tema de los radios."
+            )
+            return True
+
+    return False
+
+
+async def maybe_offer_math_battle(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Ofrece una batalla tras 3 preguntas desconocidas en 10 minutos.
+
+    Solo se llama desde el fallback de preguntas dirigidas a Pecos; por eso no
+    cuentan búsquedas técnicas, cálculos válidos ni conversaciones normales.
+    """
+    key = _math_battle_key(message)
+    if key is None:
+        return False
+
+    now = time.monotonic()
+    if key in MATH_BATTLE_ACTIVE or key in MATH_BATTLE_PENDING:
+        return False
+    if now < float(MATH_BATTLE_COOLDOWN_UNTIL.get(key, 0.0)):
+        return False
+
+    recent = [
+        ts for ts in MATH_BATTLE_UNKNOWN_TIMES.get(key, [])
+        if now - ts <= MATH_BATTLE_TRIGGER_WINDOW_SECONDS
+    ]
+    recent.append(now)
+    MATH_BATTLE_UNKNOWN_TIMES[key] = recent
+
+    if len(recent) < MATH_BATTLE_TRIGGER_COUNT:
+        return False
+
+    MATH_BATTLE_UNKNOWN_TIMES[key] = []
+    MATH_BATTLE_COOLDOWN_UNTIL[key] = now + MATH_BATTLE_OFFER_COOLDOWN_SECONDS
+    MATH_BATTLE_PENDING[key] = {
+        "expires_at": now + MATH_BATTLE_ACCEPT_WINDOW_SECONDS,
+        "usuario": display_name(message),
+    }
+
+    template = random.choice(MATH_BATTLE_OFFER_MESSAGES)
+    await message.reply_text(template.format(usuario=display_name(message)))
+    db.add_history(
+        f"GUERRA MATEMATICA OFRECIDA | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
 async def handle_safe_math(message: Message) -> bool:
     """Un cálculo correcto por usuario y por día local."""
     user = message.from_user
@@ -10812,6 +11272,9 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
     # pregunta dirigida a Pecos, responde siempre con humor rotativo en vez de
     # inventar información.
     if pecos_message_looks_like_question(message.text):
+        if await maybe_offer_math_battle(message, context):
+            return True
+
         await message.reply_text(
             choose_random(
                 "pecos_unknown_question",
@@ -11537,6 +12000,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         if await handle_internal_joke(message):
+            return
+
+    # Guerra matemática: si existe una invitación pendiente o una partida activa,
+    # sus respuestas tienen prioridad. El minijuego es independiente del límite
+    # de un cálculo matemático por usuario y por día.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_math_battle_message(message, context):
             return
 
     # Preguntas/respuestas configuradas por el administrador tienen prioridad
