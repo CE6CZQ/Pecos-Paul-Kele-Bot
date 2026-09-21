@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.31-autonomous-technical-memory"
+VERSION = "2.8.32-telegram-time-date"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -10632,6 +10632,82 @@ def pecos_password_jump_joke_requested(text_value: str) -> bool:
 
 
 
+SPANISH_WEEKDAYS = (
+    "lunes", "martes", "miércoles", "jueves",
+    "viernes", "sábado", "domingo",
+)
+
+SPANISH_MONTHS = (
+    "enero", "febrero", "marzo", "abril",
+    "mayo", "junio", "julio", "agosto",
+    "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def pecos_time_or_date_intent(text_value: str) -> str | None:
+    """Detecta consultas de hora o fecha dirigidas explícitamente a Pecos."""
+    if not text_value or not text_mentions_pecos(text_value):
+        return None
+
+    normalized = normalize_intent(text_value).lower()
+
+    time_patterns = (
+        r"\bque\s+hora(?:s)?\s+son\b",
+        r"\bque\s+hora\s+es\b",
+        r"\bque\s+hora\s+tenemos\b",
+        r"\bme\s+dices\s+la\s+hora\b",
+        r"\bdime\s+la\s+hora\b",
+        r"\bhora\s+actual\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in time_patterns):
+        return "time"
+
+    date_patterns = (
+        r"\bque\s+dia\s+es(?:\s+hoy)?\b",
+        r"\ben\s+que\s+dia\s+estamos\b",
+        r"\bque\s+fecha\s+es(?:\s+hoy)?\b",
+        r"\ben\s+que\s+fecha\s+estamos\b",
+        r"\bque\s+fecha\s+tenemos\b",
+        r"\bfecha\s+de\s+hoy\b",
+        r"\bdia\s+de\s+hoy\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in date_patterns):
+        return "date"
+
+    return None
+
+
+def pecos_message_local_datetime(message: Message) -> datetime:
+    """Toma la marca temporal que Telegram asignó al mensaje y la pasa a BOT_TZ."""
+    telegram_dt = message.date
+    try:
+        return telegram_dt.astimezone(BOT_TZ)
+    except (ValueError, AttributeError):
+        # Compatibilidad defensiva con datetimes sin tzinfo.
+        return telegram_dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(BOT_TZ)
+
+
+async def handle_pecos_time_date(message: Message) -> bool:
+    intent = pecos_time_or_date_intent(message.text or "")
+    if not intent:
+        return False
+
+    local_dt = pecos_message_local_datetime(message)
+
+    if intent == "time":
+        await message.reply_text(
+            f"🕒 Partner, según la hora registrada por Telegram, son las {local_dt:%H:%M}."
+        )
+        return True
+
+    weekday = SPANISH_WEEKDAYS[local_dt.weekday()]
+    month = SPANISH_MONTHS[local_dt.month - 1]
+    await message.reply_text(
+        f"📅 Hoy es {weekday} {local_dt.day} de {month} de {local_dt.year}."
+    )
+    return True
+
+
 def pecos_is_being_corrected(text_value: str) -> bool:
     normalized = normalize_intent(text_value or "").lower()
 
@@ -10656,6 +10732,12 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     usuario = display_name(message)
     increment_user_metric(message, "pecos_mention_count")
+
+    # Hora/fecha tienen prioridad sobre el fallback humorístico.
+    # La fuente temporal es el timestamp del propio mensaje de Telegram,
+    # convertido a la zona configurada de Pecos (America/Santiago).
+    if await handle_pecos_time_date(message):
+        return True
 
     # Broma específica solicitada por el administrador.
     # No entrega instrucciones ni intenta resolver la consulta:
