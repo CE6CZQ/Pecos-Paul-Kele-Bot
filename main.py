@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.34-kpg-family-search"
+VERSION = "2.8.35-kenwood-kpg-compatibility"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1002,6 +1002,55 @@ _last_random_index: dict[str, int] = {}
 _random_lock = threading.Lock()
 
 
+# Base de compatibilidad Kenwood aportada por el administrador.
+# Fuente: software-kpg-modelos-compatibles-43.csv
+KENWOOD_KPG_COMPATIBILITY_DATA: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ('KPG-3D', ('TK-805',), '5-Tone'),
+    ('KPG-5D', ('TK-930', 'TK-931'), ''),
+    ('KPG-6D', ('TK-705D', 'TK-805D', 'TK-706D', 'TK-806D'), ''),
+    ('KPG-7D', ('TK-630', 'TK-730', 'TK-830'), ''),
+    ('KPG-9D', ('TK-240D', 'TK-340D'), ''),
+    ('KPG-11D', ('TK-230', 'TK-330'), ''),
+    ('KPG-20D', ('TK-249', 'TK-349', 'TK-709', 'TK-809'), ''),
+    ('KPG-23D', ('TK-250', 'TK-350'), ''),
+    ('KPG-25D', ('TK-840', 'TK-940', 'TK-841', 'TK-941'), ''),
+    ('KPG-27D', ('TK-260', 'TK-360', 'TK-270', 'TK-370', 'TK-272', 'TK-372', 'TK-278', 'TK-378', 'TK-388'), ''),
+    ('KPG-28D', ('TK-759', 'TK-859', 'TK-752', 'TK-852'), ''),
+    ('KPG-29D', ('TK-760', 'TK-860', 'TK-762', 'TK-862', 'TK-768', 'TK-868'), ''),
+    ('KPG-34D', ('TK-261', 'TK-361'), ''),
+    ('KPG-35D', ('TK-480', 'TK-481'), ''),
+    ('KPG-38D', ('TK-290', 'TK-390'), ''),
+    ('KPG-44D', ('TK-690', 'TK-790', 'TK-890'), ''),
+    ('KPG-47D', ('TKR-830', 'TKR-740', 'TKR-840'), ''),
+    ('KPG-48D', ('TK-2100', 'TK-3100', 'TK-3101'), ''),
+    ('KPG-49D', ('TK-280', 'TK-380', 'TK-480', 'TK-780', 'TK-880', 'TK-980', 'TK-981'), ''),
+    ('KPG-55D', ('TK-2102', 'TK-3102', 'TK-2106', 'TK-3106', 'TK-2107', 'TK-3107'), ''),
+    ('KPG-56D', ('TK-260G', 'TK-360G', 'TK-270G', 'TK-370G', 'TK-760G', 'TK-860G', 'TK-762G', 'TK-862G', 'TK-768G', 'TK-868G'), ''),
+    ('KPG-59D', ('TK-190', 'TK-6110'), ''),
+    ('KPG-62D', ('TK-285', 'TK-385', 'TK-785', 'TK-885'), ''),
+    ('KPG-70D', ('TK-7102', 'TK-8102', 'TK-7108', 'TK-8108'), ''),
+    ('KPG-74D', ('TK-2140', 'TK-3140'), ''),
+    ('KPG-78D', ('TK-5400',), 'P25'),
+    ('KPG-82D', ('TK-2160', 'TK-3160', 'TK-2168', 'TK-3168'), ''),
+    ('KPG-87D', ('TK-2202', 'TK-3202', 'TK-2206', 'TK-3206', 'TK-2207', 'TK-3207'), ''),
+    ('KPG-88D', ('TK-2200', 'TK-3200'), 'ProTalk'),
+    ('KPG-101D', ('TK-2170', 'TK-3170', 'TK-3173'), ''),
+    ('KPG-109DN', ('NXR-700', 'NXR-800', 'NXR-900', 'NXR-901'), 'repetidores'),
+    ('KPG-110SM', ('NXR-700', 'NXR-800', 'NXR-900', 'NXR-901'), 'gestión SKF NX-5000'),
+    ('KPG-111DN', ('NX-200', 'NX-300', 'NX-410', 'NX-411', 'NX-700', 'NX-800', 'NX-900'), ''),
+    ('KPG-119DN', ('TK-2302', 'TK-3302'), ''),
+    ('KPG-124DN', ('TK-7302', 'TK-8302'), ''),
+    ('KPG-128DN', ('TK-2360', 'TK-3360'), ''),
+    ('KPG-134DN', ('TK-2312', 'TK-3312'), ''),
+    ('KPG-135DN', ('TK-7360', 'TK-8360'), ''),
+    ('KPG-141DN', ('NX-220', 'NX-320', 'NX-420', 'NX-720HG', 'NX-820HG', 'NX-920G'), ''),
+    ('KPG-143DN', ('NX-200', 'NX-300', 'NX-320', 'NX-410', 'NX-411', 'NX-420', 'NX-700', 'NX-800', 'NX-820', 'NX-900', 'NX-920'), ''),
+    ('KPG-D1N', ('NX-5200', 'NX-5300', 'NX-5400'), 'serie NX-5000'),
+    ('KPG-D3N', ('NX-3200', 'NX-3300', 'NX-3320', 'NX-3720', 'NX-3820'), 'serie NX-3000'),
+    ('KPG-D6N', ('NX-1200', 'NX-1300'), 'serie NX-1000'),
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -1237,6 +1286,7 @@ class Database:
                 variant TEXT NOT NULL DEFAULT '',
                 software TEXT NOT NULL,
                 aliases TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT 'ADMIN',
                 confidence REAL NOT NULL DEFAULT 1.0,
                 created_at TEXT NOT NULL,
@@ -1245,6 +1295,9 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_radio_software_model
                 ON radio_software_map(model, variant);
+
+            CREATE INDEX IF NOT EXISTS idx_radio_software_software
+                ON radio_software_map(software);
 
             CREATE TABLE IF NOT EXISTS technical_file_terms (
                 chat_id INTEGER NOT NULL,
@@ -1392,6 +1445,16 @@ class Database:
                 "ADD COLUMN equipment_classes TEXT NOT NULL DEFAULT ''"
             )
 
+        radio_map_columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(radio_software_map)").fetchall()
+        }
+        if "notes" not in radio_map_columns:
+            self.conn.execute(
+                "ALTER TABLE radio_software_map "
+                "ADD COLUMN notes TEXT NOT NULL DEFAULT ''"
+            )
+
         profile_columns = {
             str(row[1])
             for row in self.conn.execute("PRAGMA table_info(user_profiles)").fetchall()
@@ -1445,10 +1508,10 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO radio_software_map(
-                    brand, model, variant, software, aliases,
+                    brand, model, variant, software, aliases, notes,
                     source, confidence, created_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "KENWOOD",
@@ -1456,11 +1519,47 @@ class Database:
                     "K3",
                     "KPG-D6",
                     "TK1300N|TK-1300N|TK 1300N",
+                    "",
                     "ADMIN_CONFIRMED",
                     1.0,
                     datetime.now(BOT_TZ).isoformat(timespec="seconds"),
                 ),
             )
+
+            # Base Kenwood cargada desde el CSV aportado por el administrador:
+            # 43 softwares KPG / 161 asociaciones modelo-software.
+            now_kenwood_map = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+            for software, models, notes in KENWOOD_KPG_COMPATIBILITY_DATA:
+                for model in models:
+                    aliases = "|".join(
+                        dict.fromkeys(
+                            (
+                                model,
+                                model.replace("-", ""),
+                                model.replace("-", " "),
+                            )
+                        )
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO radio_software_map(
+                            brand, model, variant, software, aliases, notes,
+                            source, confidence, created_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "KENWOOD",
+                            model,
+                            "",
+                            software,
+                            aliases,
+                            notes,
+                            "USER_KENWOOD_KPG_CSV",
+                            1.0,
+                            now_kenwood_map,
+                        ),
+                    )
 
             self.conn.commit()
 
@@ -1490,7 +1589,7 @@ class Database:
         with self.lock:
             return self.conn.execute(
                 """
-                SELECT id, brand, model, variant, software, aliases,
+                SELECT id, brand, model, variant, software, aliases, notes,
                        source, confidence
                 FROM radio_software_map
                 ORDER BY brand, model, variant, software
@@ -6117,51 +6216,178 @@ def radio_software_request_signal(text_value: str) -> bool:
     return any(signal in normalized for signal in signals)
 
 
+def radio_map_exact_model_in_text(text_value: str, model: str) -> bool:
+    """Detecta el modelo exacto; TK-480 no se confunde con TK-480G."""
+    model = str(model or "").strip().upper()
+    match = re.fullmatch(r"([A-Z]+)-([A-Z0-9]+)", model)
+    if not match:
+        return False
+
+    prefix, body = match.groups()
+    upper = technical_ascii_upper(text_value or "")
+    return bool(
+        re.search(
+            rf"(?<![A-Z0-9]){re.escape(prefix)}[\s._-]*{re.escape(body)}(?![A-Z0-9])",
+            upper,
+        )
+    )
+
+
+def radio_map_exact_variant_in_text(text_value: str, variant: str) -> bool:
+    variant = str(variant or "").strip().upper()
+    if not variant:
+        return True
+    upper = technical_ascii_upper(text_value or "")
+    return bool(
+        re.search(
+            rf"(?<![A-Z0-9]){re.escape(variant)}(?![A-Z0-9])",
+            upper,
+        )
+    )
+
+
 def find_radio_software_associations(text_value: str) -> list[sqlite3.Row]:
     if not text_value:
         return []
 
-    normalized = normalize_intent(text_value)
-    compact_text = re.sub(r"[^a-z0-9]", "", normalized)
     matches: list[sqlite3.Row] = []
-
     for row in db.list_radio_software_map():
-        aliases = [
-            str(row["model"] or ""),
-            *[
-                item.strip()
-                for item in str(row["aliases"] or "").split("|")
-                if item.strip()
-            ],
-        ]
-
-        model_match = False
-        for alias in aliases:
-            alias_compact = re.sub(
-                r"[^a-z0-9]",
-                "",
-                normalize_intent(alias),
-            )
-            if alias_compact and alias_compact in compact_text:
-                model_match = True
-                break
-
-        if not model_match:
+        model = str(row["model"] or "").strip()
+        if not radio_map_exact_model_in_text(text_value, model):
             continue
 
         variant = str(row["variant"] or "").strip()
-        if variant:
-            variant_compact = re.sub(
-                r"[^a-z0-9]",
-                "",
-                normalize_intent(variant),
-            )
-            if variant_compact and variant_compact not in compact_text:
+        if variant and not radio_map_exact_variant_in_text(text_value, variant):
+            continue
+
+        matches.append(row)
+
+    unique: list[sqlite3.Row] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in matches:
+        key = (
+            str(row["model"] or "").upper(),
+            str(row["variant"] or "").upper(),
+            str(row["software"] or "").upper(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+
+    return unique
+
+
+def kpg_compatibility_question_intent(text_value: str) -> bool:
+    normalized = normalize_intent(text_value or "")
+    if "kpg" not in normalized:
+        return False
+
+    signals = (
+        "que modelos", "cuales modelos", "para que modelos",
+        "que radios", "cuales radios", "para que radios",
+        "que equipos", "cuales equipos", "para que equipos",
+        "compatible", "compatibilidad", "sirve para",
+        "a que modelos", "a que radios", "a que equipos",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+def extract_requested_kpg_software(text_value: str) -> str | None:
+    upper = technical_ascii_upper(text_value or "")
+    match = re.search(r"\bKPG[\s._-]*([A-Z]?\d+[A-Z]*)\b", upper)
+    if not match:
+        return None
+    return f"KPG-{match.group(1)}"
+
+
+def find_kpg_compatibility_rows(text_value: str) -> list[sqlite3.Row]:
+    requested = extract_requested_kpg_software(text_value)
+    if not requested:
+        return []
+
+    requested_compact = technical_term_normalized(requested)
+    numeric_family = technical_kpg_numeric_family_root(requested)
+
+    matches = []
+    for row in db.list_radio_software_map():
+        if str(row["brand"] or "").upper() != "KENWOOD":
+            continue
+
+        software = str(row["software"] or "").strip()
+        software_compact = technical_term_normalized(software)
+
+        if numeric_family:
+            if not re.fullmatch(
+                rf"{re.escape(numeric_family)}[A-Z]*",
+                software_compact,
+            ):
                 continue
+        elif software_compact != requested_compact:
+            continue
 
         matches.append(row)
 
     return matches
+
+
+async def handle_kpg_compatibility_question(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    text_value = message.text or message.caption or ""
+    if not text_value or not kpg_compatibility_question_intent(text_value):
+        return False
+
+    requested = extract_requested_kpg_software(text_value)
+    rows = find_kpg_compatibility_rows(text_value)
+    if not requested or not rows:
+        return False
+
+    usuario = display_name(message)
+    by_software: dict[str, list[sqlite3.Row]] = {}
+
+    for row in rows:
+        software = str(row["software"] or "").strip()
+        by_software.setdefault(software, []).append(row)
+
+    lines = [
+        f"📚 {usuario}, según el listado de compatibilidad Kenwood cargado por el administrador:"
+    ]
+
+    for software, software_rows in by_software.items():
+        models = []
+        notes = []
+
+        for row in software_rows:
+            model = str(row["model"] or "").strip()
+            if model and model not in models:
+                models.append(model)
+
+            note = str(row["notes"] or "").strip()
+            if note and note not in notes:
+                notes.append(note)
+
+        lines.append(f"💻 {software} → 📻 " + ", ".join(models))
+
+        if notes:
+            lines.append("📝 Nota del listado: " + "; ".join(notes))
+
+    if len(by_software) > 1:
+        lines.append(
+            "ℹ️ Como pediste la familia numérica sin sufijo, Pecos incluyó "
+            "las variantes alfabéticas documentadas con ese mismo número."
+        )
+
+    await context.bot.send_message(
+        chat_id=message.chat_id,
+        text="\n\n".join(lines),
+    )
+    db.add_history(
+        f"COMPATIBILIDAD KPG->MODELOS | {requested} | "
+        f"variantes={len(by_software)} | {usuario}"
+    )
+    return True
 
 
 async def handle_radio_software_association(
@@ -6177,39 +6403,71 @@ async def handle_radio_software_association(
         return False
 
     usuario = display_name(message)
-    row = associations[0]
 
-    brand = str(row["brand"] or "").strip()
-    model = str(row["model"] or "").strip()
-    variant = str(row["variant"] or "").strip()
-    software = str(row["software"] or "").strip()
-
-    model_label = " ".join(part for part in (brand, model, variant) if part)
-
-    # La relación modelo/software viene de la tabla confirmada. Después se
-    # consulta el catálogo real para entregar enlace SOLO si el archivo existe.
-    rows = search_archive_rows(message.chat_id, software, limit=3)
+    grouped: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+    for row in associations:
+        key = (
+            str(row["brand"] or "").strip(),
+            str(row["model"] or "").strip(),
+            str(row["variant"] or "").strip(),
+        )
+        grouped.setdefault(key, []).append(row)
 
     lines = [
-        f"👀 {usuario}, Pecos tiene registrado que para {model_label} "
-        f"el software asociado es {software}."
+        f"🧰 {usuario}, Pecos revisó la tabla de compatibilidad Kenwood cargada por el administrador."
     ]
 
-    if rows:
-        lines.append("📦 Además lo encontré en los archivos del grupo:")
-        lines.extend(archive_result_lines(message.chat, rows, max_items=3))
-    else:
-        lines.append(
-            f"🌵 La asociación con {software} está registrada, pero ahora mismo "
-            "no encontré un archivo del grupo que pueda enlazar con suficiente seguridad."
-        )
+    for (brand, model, variant), group_rows in grouped.items():
+        model_label = " ".join(part for part in (brand, model, variant) if part)
+
+        softwares = []
+        notes = []
+        for row in group_rows:
+            software = str(row["software"] or "").strip()
+            if software and software not in softwares:
+                softwares.append(software)
+            note = str(row["notes"] or "").strip()
+            if note and note not in notes:
+                notes.append(note)
+
+        if len(softwares) == 1:
+            lines.append(f"📻 {model_label} → 💻 {softwares[0]}")
+        else:
+            lines.append(
+                f"📻 {model_label} → 💻 " + ", ".join(softwares)
+            )
+            lines.append(
+                "ℹ️ El listado contiene más de un software asociado; "
+                "Pecos no elegirá uno al azar."
+            )
+
+        if notes:
+            lines.append("📝 Nota del listado: " + "; ".join(notes))
+
+        any_archive = False
+        for software in softwares:
+            archive_rows = search_archive_rows(message.chat_id, software, limit=3)
+            if not archive_rows:
+                continue
+            any_archive = True
+            lines.append(f"📦 {software} encontrado en los archivos:")
+            lines.extend(
+                archive_result_lines(message.chat, archive_rows, max_items=3)
+            )
+
+        if not any_archive:
+            lines.append(
+                "🌵 La compatibilidad está registrada, pero no encontré en este grupo "
+                "un archivo que pueda enlazar con suficiente seguridad."
+            )
 
     await context.bot.send_message(
         chat_id=message.chat_id,
         text="\n\n".join(lines),
     )
     db.add_history(
-        f"ASOCIACION RADIO-SOFTWARE | {model_label} -> {software} | {usuario}"
+        f"ASOCIACION RADIO-SOFTWARE KENWOOD | "
+        f"consulta={text_value[:180]} | resultados={len(associations)} | {usuario}"
     )
     return True
 
@@ -12064,6 +12322,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     ):
         await capture_answer_to_known_question(message, context)
+
+        if await handle_kpg_compatibility_question(message, context):
+            return
 
         if await handle_radio_software_association(message, context):
             return
