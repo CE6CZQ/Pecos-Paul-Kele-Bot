@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.35-kenwood-kpg-compatibility"
+VERSION = "2.8.37-active-users-now"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -2327,6 +2327,25 @@ class Database:
                 WHERE chat_id = ? AND user_id > 0
                 """,
                 (chat_id,),
+            ).fetchall()
+
+    def get_recent_activity_profiles(
+        self,
+        chat_id: int,
+        cutoff_iso: str,
+    ) -> list[sqlite3.Row]:
+        """Usuarios que Pecos observó escribiendo desde cutoff_iso."""
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT user_id, username, display_name, first_seen, last_seen
+                FROM user_profiles
+                WHERE chat_id = ?
+                  AND user_id > 0
+                  AND last_seen >= ?
+                ORDER BY last_seen DESC
+                """,
+                (chat_id, cutoff_iso),
             ).fetchall()
 
     def claim_reputation_notice(self, chat_id: int, user_id: int, milestone: int) -> bool:
@@ -10876,6 +10895,38 @@ def _math_battle_normalized_reply(text_value: str) -> str:
     return normalized
 
 
+
+def _math_battle_direct_challenge_requested(text_value: str) -> bool:
+    """Permite iniciar la guerra matemática por petición explícita.
+
+    Ejemplos admitidos:
+      - "desafio matematico a pecos"
+      - "desafío matemático a Pecos"
+      - "Pecos desafio matematico"
+      - "Pecos reto matematico"
+      - "reto matematico a pecos"
+      - "Pecos te desafio a una guerra matematica"
+      - "Pecos guerra matematica"
+    """
+    normalized = normalize_intent(text_value or "").strip().lower()
+    normalized = re.sub(r"\s+", " ", normalized)
+
+    if not re.search(r"\bpecos?\b", normalized):
+        return False
+
+    patterns = (
+        r"\bdesafio\s+matematico\b",
+        r"\breto\s+matematico\b",
+        r"\bguerra\s+matematica\b",
+        r"\bte\s+desafio\b.*\bmatematic",
+        r"\bdesafio\b.*\bpecos?\b.*\bmatematic",
+        r"\bpecos?\b.*\bdesafio\b.*\bmatematic",
+        r"\bpecos?\b.*\breto\b.*\bmatematic",
+        r"\bpecos?\b.*\bguerra\b.*\bmatematic",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
 def _math_battle_accepts(text_value: str) -> bool:
     value = _math_battle_normalized_reply(text_value)
     accepted = {
@@ -11150,6 +11201,28 @@ async def handle_math_battle_message(
 
     text_value = message.text or message.caption or ""
     now = time.monotonic()
+
+    # Activación explícita: no obliga al usuario a provocar tres respuestas
+    # desconocidas primero. Si llama a Pecos y pide un desafío/reto/guerra
+    # matemática, la batalla comienza inmediatamente.
+    if _math_battle_direct_challenge_requested(text_value):
+        if key in MATH_BATTLE_ACTIVE:
+            await message.reply_text(
+                "⚔️ Partner, ya estamos en plena guerra matemática. "
+                "Primero responde la ronda actual. 😎"
+            )
+            return True
+
+        MATH_BATTLE_PENDING.pop(key, None)
+        MATH_BATTLE_UNKNOWN_TIMES.pop(key, None)
+        MATH_BATTLE_COOLDOWN_UNTIL.pop(key, None)
+
+        await _math_battle_start(message, context)
+        db.add_history(
+            f"GUERRA MATEMATICA INICIO DIRECTO | "
+            f"{display_name(message)} | chat {message.chat_id}"
+        )
+        return True
 
     state = MATH_BATTLE_ACTIVE.get(key)
     if state:
@@ -11504,6 +11577,80 @@ async def handle_pecos_time_date(message: Message) -> bool:
     month = SPANISH_MONTHS[local_dt.month - 1]
     await message.reply_text(
         f"📅 Hoy es {weekday} {local_dt.day} de {month} de {local_dt.year}."
+    )
+    return True
+
+
+
+ACTIVE_NOW_WINDOW_MINUTES = 5
+
+
+def pecos_active_users_intent(text_value: str) -> bool:
+    if not text_value or not text_mentions_pecos(text_value):
+        return False
+
+    normalized = normalize_intent(text_value).lower()
+
+    patterns = (
+        r"\bcuantos?\s+(?:usuarios?\s+)?(?:estan|hay)\s+conectados?\b",
+        r"\bcuantos?\s+(?:usuarios?\s+)?(?:estan|hay)\s+en\s+linea\b",
+        r"\bcuantos?\s+(?:usuarios?\s+)?(?:estan|hay)\s+online\b",
+        r"\busuarios?\s+conectados?\b",
+        r"\busuarios?\s+en\s+linea\b",
+        r"\bgente\s+conectada\b",
+        r"\bquienes?\s+estan\s+conectados?\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+async def handle_current_group_activity(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not pecos_active_users_intent(message.text or ""):
+        return False
+
+    chat = message.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return False
+
+    now = datetime.now(BOT_TZ)
+    cutoff = now - timedelta(minutes=ACTIVE_NOW_WINDOW_MINUTES)
+    recent = db.get_recent_activity_profiles(
+        message.chat_id,
+        cutoff.isoformat(timespec="seconds"),
+    )
+
+    active_count = len({int(row["user_id"]) for row in recent})
+
+    total_members = None
+    try:
+        total_members = await context.bot.get_chat_member_count(message.chat_id)
+    except TelegramError:
+        total_members = None
+
+    lines = [
+        "👥 Telegram no permite que Pecos vea la presencia «online» real de todos los miembros.",
+        (
+            f"📡 En el momento de esta consulta, Pecos observa "
+            f"{active_count} usuario{'s' if active_count != 1 else ''} "
+            f"con actividad en los últimos {ACTIVE_NOW_WINDOW_MINUTES} minutos."
+        ),
+    ]
+
+    if total_members is not None:
+        lines.append(f"👤 Miembros totales del grupo: {int(total_members)}.")
+
+    lines.append(
+        "ℹ️ Puede haber más personas conectadas leyendo sin escribir; "
+        "Telegram no expone ese dato a los bots."
+    )
+
+    await message.reply_text("\n".join(lines))
+    db.add_history(
+        f"CONSULTA ACTIVOS AHORA | chat={message.chat_id} | "
+        f"activos_{ACTIVE_NOW_WINDOW_MINUTES}m={active_count} | "
+        f"miembros={total_members if total_members is not None else 'ND'}"
     )
     return True
 
@@ -12323,6 +12470,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ):
         await capture_answer_to_known_question(message, context)
 
+        # Consulta pública de actividad actual observada.
+        # No requiere ser administrador.
+        if await handle_current_group_activity(message, context):
+            return
+
         if await handle_kpg_compatibility_question(message, context):
             return
 
@@ -12345,9 +12497,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_internal_joke(message):
             return
 
-    # Guerra matemática: si existe una invitación pendiente o una partida activa,
-    # sus respuestas tienen prioridad. El minijuego es independiente del límite
-    # de un cálculo matemático por usuario y por día.
+    # Guerra matemática: puede iniciarse explícitamente ("desafío matemático a Pecos")
+    # o por la invitación automática tras varias preguntas fuera de alcance.
+    # Si existe una invitación pendiente o una partida activa, sus respuestas
+    # tienen prioridad. El minijuego es independiente del límite diario de cálculo.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if await handle_math_battle_message(message, context):
             return
