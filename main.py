@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.44-ignore-no-hay-caso"
+VERSION = "2.8.45-arithmetic-sequences"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -11771,6 +11771,9 @@ ADVANCED_MATH_KEYWORDS = (
     "ecuacion", "ecuación",
     "raiz cubica", "raiz cuarta", "valor absoluto",
     "e elevado", "pi elevado",
+    "sucesion aritmetica", "progresion aritmetica",
+    "sucesiones aritmeticas", "progresiones aritmeticas",
+    "termino general", "diferencia comun",
 )
 
 
@@ -11967,6 +11970,183 @@ def _integrate_polynomial(coeffs: dict[int, Fraction]) -> dict[int, Fraction]:
         new_power = power + 1
         out[new_power] = out.get(new_power, Fraction(0)) + coeff / new_power
     return out
+
+
+
+def _arithmetic_sequence_intent(text_value: str) -> bool:
+    normalized = normalize_intent(text_value or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:sucesion(?:es)?|progresion(?:es)?)\s+aritmetica(?:s)?\b",
+            normalized,
+        )
+        or re.search(r"\btermino\s+general\b", normalized)
+        or re.search(r"\bdiferencia\s+comun\b", normalized)
+    )
+
+
+def _extract_arithmetic_sequence_terms(
+    text_value: str,
+) -> list[tuple[int, Fraction]]:
+    """Extrae notaciones como a3=11, a_3=11 o a 3 = 11."""
+    normalized = normalize_intent(text_value or "").lower()
+    matches = re.findall(
+        r"(?<![a-z0-9_])a\s*_?\s*(\d{1,5})\s*=\s*([+-]?\d+(?:[.,]\d+)?)",
+        normalized,
+    )
+
+    found: dict[int, Fraction] = {}
+    for index_text, value_text in matches:
+        index = int(index_text)
+        if index < 1:
+            continue
+        value = Fraction(value_text.replace(",", "."))
+        found[index] = value
+
+    return sorted(found.items())
+
+
+def _arithmetic_sequence_symbolic_request(text_value: str) -> bool:
+    """Detecta la pregunta genérica con a_m y a_k, sin valores numéricos."""
+    normalized = normalize_intent(text_value or "").lower()
+    compact = re.sub(r"\s+", "", normalized)
+
+    has_am = bool(re.search(r"\ba\s*_?\s*m\b", normalized)) or "am" in compact
+    has_ak = bool(re.search(r"\ba\s*_?\s*k\b", normalized)) or "ak" in compact
+    has_an = bool(re.search(r"\ba\s*_?\s*n\b", normalized)) or "an" in compact
+
+    return (
+        _arithmetic_sequence_intent(text_value)
+        and has_am
+        and has_ak
+        and has_an
+    )
+
+
+def _format_arithmetic_general_term(
+    d: Fraction,
+    intercept: Fraction,
+) -> str:
+    """Formatea a_n = d*n + b usando fracciones exactas."""
+    parts: list[str] = ["a_n = "]
+
+    if d == 0:
+        parts.append(_format_fraction(intercept))
+        return "".join(parts)
+
+    # término con n
+    if d == 1:
+        parts.append("n")
+    elif d == -1:
+        parts.append("-n")
+    else:
+        parts.append(f"{_format_fraction(d)}n")
+
+    # término independiente
+    if intercept > 0:
+        parts.append(f" + {_format_fraction(intercept)}")
+    elif intercept < 0:
+        parts.append(f" - {_format_fraction(abs(intercept))}")
+
+    return "".join(parts)
+
+
+def _handle_arithmetic_sequence_math(text_value: str) -> tuple[str, bool] | None:
+    """Resuelve sucesiones/progresiones aritméticas a partir de dos términos.
+
+    Devuelve (respuesta, solved). También responde la fórmula simbólica general.
+    """
+    if not _arithmetic_sequence_intent(text_value):
+        return None
+
+    # Caso teórico/simbólico: a_m y a_k, m < k.
+    if _arithmetic_sequence_symbolic_request(text_value):
+        return (
+            "🧮 Para una sucesión aritmética, si conoces a_m y a_k con m < k:\n"
+            "d = (a_k - a_m) / (k - m)\n"
+            "a_n = a_m + (n - m)d\n"
+            "Por tanto:\n"
+            "a_n = a_m + (n - m)(a_k - a_m)/(k - m)",
+            True,
+        )
+
+    terms = _extract_arithmetic_sequence_terms(text_value)
+
+    # También aceptar a1 + diferencia d.
+    normalized = normalize_intent(text_value or "").lower()
+    d_match = re.search(
+        r"(?<![a-z0-9_])d\s*=\s*([+-]?\d+(?:[.,]\d+)?)",
+        normalized,
+    )
+
+    if len(terms) >= 2:
+        # Usar los dos primeros índices distintos en orden.
+        (m, a_m), (k, a_k) = terms[0], terms[1]
+
+        if m == k:
+            return (
+                "🧮 Necesito dos términos con índices distintos para calcular la diferencia común.",
+                False,
+            )
+
+        if m > k:
+            m, k = k, m
+            a_m, a_k = a_k, a_m
+
+        d = (a_k - a_m) / Fraction(k - m)
+        intercept = a_m - d * m
+
+        # Verificar si el usuario pide un término concreto.
+        target_index = None
+        target_patterns = (
+            r"\ba\s*_?\s*(\d{1,5})\s*\?",
+            r"\bcalcula(?:r)?\s+a\s*_?\s*(\d{1,5})\b",
+            r"\bhalla(?:r)?\s+a\s*_?\s*(\d{1,5})\b",
+            r"\btermino\s+(\d{1,5})\b",
+        )
+        for pattern in target_patterns:
+            tm = re.search(pattern, normalized)
+            if tm:
+                candidate = int(tm.group(1))
+                if candidate not in {m, k}:
+                    target_index = candidate
+                    break
+
+        lines = [
+            f"🧮 Datos: a_{m} = {_format_fraction(a_m)}, a_{k} = {_format_fraction(a_k)}",
+            f"d = (a_{k} - a_{m}) / ({k} - {m}) = {_format_fraction(d)}",
+            f"✅ Término general: {_format_arithmetic_general_term(d, intercept)}",
+        ]
+
+        if target_index is not None and target_index >= 1:
+            target_value = d * target_index + intercept
+            lines.append(
+                f"📌 a_{target_index} = {_format_fraction(target_value)}"
+            )
+
+        return ("\n".join(lines), True)
+
+    if len(terms) == 1 and d_match:
+        n0, a_n0 = terms[0]
+        d = Fraction(d_match.group(1).replace(",", "."))
+        intercept = a_n0 - d * n0
+
+        return (
+            "\n".join(
+                [
+                    f"🧮 Datos: a_{n0} = {_format_fraction(a_n0)}, d = {_format_fraction(d)}",
+                    f"✅ Término general: {_format_arithmetic_general_term(d, intercept)}",
+                ]
+            ),
+            True,
+        )
+
+    return (
+        "🧮 Para resolver una sucesión aritmética necesito, por ejemplo, dos términos:\n"
+        "«Pecos, sucesión aritmética a3=11 y a8=31, calcula el término general»\n"
+        "También puedo usar un término y la diferencia común, por ejemplo: «a3=11, d=4».",
+        False,
+    )
 
 
 def _advanced_math_symbolic(text_value: str) -> tuple[str, str] | None:
@@ -12305,21 +12485,25 @@ async def handle_advanced_math(message: Message) -> bool:
     solved = False
 
     try:
-        symbolic = _advanced_math_symbolic(text_value)
-        if symbolic is not None:
-            response, kind = symbolic
-            solved = kind != "unsupported"
+        arithmetic_sequence = _handle_arithmetic_sequence_math(text_value)
+        if arithmetic_sequence is not None:
+            response, solved = arithmetic_sequence
         else:
-            equation = _advanced_math_equation(text_value)
-            if equation is not None:
-                response = equation
-                solved = not equation.startswith("🧮 Pecos reconoce")
+            symbolic = _advanced_math_symbolic(text_value)
+            if symbolic is not None:
+                response, kind = symbolic
+                solved = kind != "unsupported"
             else:
-                numeric = _advanced_math_numeric(text_value)
-                if numeric is not None:
-                    label, result = numeric
-                    response = f"🧮 {label} = {_format_math_number(result)}"
-                    solved = True
+                equation = _advanced_math_equation(text_value)
+                if equation is not None:
+                    response = equation
+                    solved = not equation.startswith("🧮 Pecos reconoce")
+                else:
+                    numeric = _advanced_math_numeric(text_value)
+                    if numeric is not None:
+                        label, result = numeric
+                        response = f"🧮 {label} = {_format_math_number(result)}"
+                        solved = True
     except SafeMathError as exc:
         await message.reply_text(
             f"🧮 Esa operación avanzada no me cuadra, {display_name(message)}: {exc}."
@@ -12408,7 +12592,10 @@ async def handle_math_help(message: Message) -> bool:
         "• Pecos integral de 3x^2 + 2x - 5\n"
         "• Pecos derivada de x^3 + 4x\n"
         "• Pecos resuelve 2x + 5 = 17\n"
-        "• Pecos resuelve x^2 - 5x + 6 = 0\n\n"
+        "• Pecos resuelve x^2 - 5x + 6 = 0\n"
+        "• Pecos sucesion aritmetica a3=11 y a8=31, calcula el termino general\n"
+        "• Pecos progresion aritmetica a5=17 y a12=45, calcula a20\n"
+        "• Pecos termino general a_n a partir de a_m y a_k, con m<k\n\n"
         "También puedes retarme con «Pecos reto matematico» para iniciar la guerra matemática. 🤠"
     )
     return True
