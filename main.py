@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.40-math-battle-pause-after-timeout"
+VERSION = "2.8.41-natural-math-questions"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -10717,6 +10717,161 @@ class SafeMathError(ValueError):
     pass
 
 
+
+def _math_number_token(value: str) -> str:
+    return value.strip().replace(",", ".")
+
+
+def _math_natural_language_candidate(
+    text_value: str,
+) -> tuple[str | None, str | None]:
+    """Convierte preguntas matemáticas simples en español a una expresión segura.
+
+    Ejemplos:
+      Pecos cuanto es 10 por 10 menos 10
+      Pecos suma 25 y 18
+      Pecos multiplica 7 por 8
+      Pecos divide 150 entre 3
+      Pecos cual es el doble de 18
+      Pecos cual es la mitad de 90
+      Pecos 15 por ciento de 800
+    """
+    raw = (text_value or "").strip()
+    if not raw:
+        return None, None
+
+    normalized = normalize_intent(raw).lower()
+
+    # Quitar llamadas al bot.
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            normalized = re.sub(
+                rf"(?<![a-z0-9_])@?{re.escape(alias_norm)}(?![a-z0-9_])",
+                " ",
+                normalized,
+            )
+    normalized = re.sub(
+        r"(?<![a-z0-9_])(?:pecos|peco)(?![a-z0-9_])",
+        " ",
+        normalized,
+    )
+
+    # Quitar fórmulas introductorias habituales.
+    normalized = re.sub(
+        r"^\s*(?:"
+        r"dime\s+|"
+        r"me\s+dices\s+|"
+        r"me\s+puedes\s+decir\s+|"
+        r"cual\s+es\s+|"
+        r"cuanto\s+es\s+|"
+        r"cuanto\s+da\s+|"
+        r"cuanto\s+resulta\s+|"
+        r"calcula\s+|calcular\s+|"
+        r"resuelve\s+|resolver\s+|"
+        r"resultado\s+de\s+"
+        r")",
+        "",
+        normalized,
+    )
+    normalized = normalized.strip(" ?¿!¡=.;:")
+    normalized = re.sub(r"\s+", " ", normalized)
+
+    number = r"([+-]?\d+(?:[.,]\d+)?)"
+
+    # Porcentaje natural: "15 por ciento de 800".
+    match = re.fullmatch(
+        rf"{number}\s+(?:por\s+ciento|porciento)\s+de\s+{number}",
+        normalized,
+    )
+    if match:
+        left = _math_number_token(match.group(1))
+        right = _math_number_token(match.group(2))
+        return f"(({left})/100)*({right})", normalized
+
+    # Doble / triple / mitad.
+    match = re.fullmatch(rf"(?:el\s+)?doble\s+de\s+{number}", normalized)
+    if match:
+        n = _math_number_token(match.group(1))
+        return f"2*({n})", normalized
+
+    match = re.fullmatch(rf"(?:el\s+)?triple\s+de\s+{number}", normalized)
+    if match:
+        n = _math_number_token(match.group(1))
+        return f"3*({n})", normalized
+
+    match = re.fullmatch(rf"(?:la\s+)?mitad\s+de\s+{number}", normalized)
+    if match:
+        n = _math_number_token(match.group(1))
+        return f"({n})/2", normalized
+
+    # Raíz cuadrada simple.
+    match = re.fullmatch(rf"(?:la\s+)?raiz\s+cuadrada\s+de\s+{number}", normalized)
+    if match:
+        n = _math_number_token(match.group(1))
+        if float(n) < 0:
+            return None, None
+        return f"({n})**0.5", normalized
+
+    # Verbos explícitos.
+    match = re.fullmatch(rf"suma\s+{number}\s+(?:y|mas)\s+{number}", normalized)
+    if match:
+        a = _math_number_token(match.group(1))
+        b = _math_number_token(match.group(2))
+        return f"({a})+({b})", normalized
+
+    match = re.fullmatch(rf"resta\s+{number}\s+(?:menos|y)\s+{number}", normalized)
+    if match:
+        a = _math_number_token(match.group(1))
+        b = _math_number_token(match.group(2))
+        return f"({a})-({b})", normalized
+
+    # "resta 8 a 20" = 20 - 8
+    match = re.fullmatch(rf"resta\s+{number}\s+a\s+{number}", normalized)
+    if match:
+        subtrahend = _math_number_token(match.group(1))
+        minuend = _math_number_token(match.group(2))
+        return f"({minuend})-({subtrahend})", normalized
+
+    match = re.fullmatch(
+        rf"(?:multiplica|multiplicar)\s+{number}\s+(?:por|x)\s+{number}",
+        normalized,
+    )
+    if match:
+        a = _math_number_token(match.group(1))
+        b = _math_number_token(match.group(2))
+        return f"({a})*({b})", normalized
+
+    match = re.fullmatch(
+        rf"(?:divide|dividir)\s+{number}\s+(?:entre|por)\s+{number}",
+        normalized,
+    )
+    if match:
+        a = _math_number_token(match.group(1))
+        b = _math_number_token(match.group(2))
+        return f"({a})/({b})", normalized
+
+    # Expresión en palabras con prioridad matemática:
+    # "10 por 10 menos 10", "8 mas 2 por 5", etc.
+    word_expr = normalized
+    word_expr = re.sub(r"\bdividido\s+(?:por|entre)\b", "/", word_expr)
+    word_expr = re.sub(r"\bentre\b", "/", word_expr)
+    word_expr = re.sub(r"\bpor\b", "*", word_expr)
+    word_expr = re.sub(r"\bmas\b", "+", word_expr)
+    word_expr = re.sub(r"\bmenos\b", "-", word_expr)
+    word_expr = re.sub(r"\s+", " ", word_expr).strip()
+
+    # Solo aceptar si después de traducir quedaron números, operadores y paréntesis.
+    if (
+        re.search(r"[+\-*/]", word_expr)
+        and re.fullmatch(r"[0-9.,\s+\-*/()]+", word_expr)
+    ):
+        word_expr = re.sub(r"(?<=\d),(?=\d)", ".", word_expr)
+        return word_expr, normalized
+
+    return None, None
+
+
 def _math_candidate_text(text_value: str) -> tuple[str | None, str | None]:
     """Extrae una expresión aritmética solo cuando la intención es clara."""
     raw = (text_value or "").strip()
@@ -10734,6 +10889,12 @@ def _math_candidate_text(text_value: str) -> tuple[str | None, str | None]:
 
     if not (directed_to_pecos or explicit_math):
         return None, None
+
+    # Primero probar lenguaje natural. Si no coincide, se conserva el parser
+    # simbólico ya existente.
+    natural_expression, natural_display = _math_natural_language_candidate(raw)
+    if natural_expression is not None and natural_display is not None:
+        return natural_expression, natural_display
 
     # Caso natural de porcentaje: "15% de 800".
     percent_source = normalized
@@ -11578,6 +11739,42 @@ async def maybe_offer_math_battle(
     await message.reply_text(template.format(usuario=display_name(message)))
     db.add_history(
         f"GUERRA MATEMATICA OFRECIDA | {display_name(message)} | chat {message.chat_id}"
+    )
+    return True
+
+
+
+def pecos_math_help_intent(text_value: str) -> bool:
+    if not text_value or not text_mentions_pecos(text_value):
+        return False
+
+    normalized = normalize_intent(text_value).lower()
+    patterns = (
+        r"\bque\s+calculos?\s+(?:puedes|sabes)\s+hacer\b",
+        r"\bcomo\s+te\s+pregunto\s+(?:un\s+)?calculo\b",
+        r"\bcomo\s+hago\s+un\s+calculo\b",
+        r"\bque\s+matematicas?\s+sabes\b",
+        r"\bayuda\s+matematica\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+async def handle_math_help(message: Message) -> bool:
+    if not pecos_math_help_intent(message.text or ""):
+        return False
+
+    await message.reply_text(
+        "🧮 Puedes preguntarme una cuenta directa por día, partner. Ejemplos:\n"
+        "• Pecos cuanto es 10*10-10\n"
+        "• Pecos cuanto es 10 por 10 menos 10\n"
+        "• Pecos suma 25 y 18\n"
+        "• Pecos multiplica 7 por 8\n"
+        "• Pecos divide 150 entre 3\n"
+        "• Pecos cual es el doble de 18\n"
+        "• Pecos cual es la mitad de 90\n"
+        "• Pecos 15 por ciento de 800\n"
+        "• Pecos raiz cuadrada de 144\n\n"
+        "También puedes retarme con «Pecos reto matematico» para iniciar la guerra matemática. 🤠"
     )
     return True
 
@@ -12746,8 +12943,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_custom_qa(message):
             return
 
-        # Cálculo matemático seguro: una respuesta por usuario y por día.
-        # Se procesa antes de la respuesta genérica a preguntas dirigidas a Pecos.
+        # Ayuda y cálculo matemático seguro: una respuesta por usuario y por día.
+        # La ayuda no consume el cálculo diario.
+        if await handle_math_help(message):
+            return
+
         if await handle_safe_math(message):
             return
 
