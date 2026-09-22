@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.42-advanced-math"
+VERSION = "2.8.43-disable-melerix-xerax-jokes"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -773,6 +773,12 @@ MELERIX_FUN_MESSAGES = [
     "🌵 Melerix otra vez en boca del pueblo. Pecos oficialmente se declara curioso.",
 ]
 
+
+# Bromas especiales desactivadas por decisión del administrador.
+# Se conserva el código/repertorio por compatibilidad, pero los handlers
+# retornan False y no interceptan la conversación normal.
+MELERIX_JOKES_ENABLED = False
+XERAX_JOKES_ENABLED = False
 
 XERAX_USERNAME = "xerax"
 
@@ -10510,6 +10516,9 @@ async def handle_xerax_auto_presence(message: Message) -> bool:
     - persistente en SQLite;
     - NO consume ni reemplaza las bromas antiguas por mención.
     """
+    if not XERAX_JOKES_ENABLED:
+        return False
+
     user = message.from_user
     if not user or user.is_bot or not user.username:
         return False
@@ -10614,6 +10623,9 @@ async def handle_melerix_fun(message: Message) -> bool:
     - El/los OWNER_USER_IDS pueden activar la broma todas las veces que quieran.
     - El control de uso queda persistido en SQLite.
     """
+    if not MELERIX_JOKES_ENABLED:
+        return False
+
     text_value = message.text or message.caption or ""
     if not text_value or not message.from_user or message.from_user.is_bot:
         return False
@@ -10673,6 +10685,9 @@ async def handle_xerax_fun(message: Message) -> bool:
     - El OWNER puede activarla ilimitadamente.
     - Usa una clave separada de Melerix, por lo que ambos límites son independientes.
     """
+    if not XERAX_JOKES_ENABLED:
+        return False
+
     if not message.from_user or message.from_user.is_bot:
         return False
 
