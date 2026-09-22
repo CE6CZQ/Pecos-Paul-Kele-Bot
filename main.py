@@ -38,6 +38,7 @@ import time
 import unicodedata
 from urllib.parse import unquote, urlparse
 from datetime import datetime, timedelta
+from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -69,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.41-natural-math-questions"
+VERSION = "2.8.42-advanced-math"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -11744,6 +11745,617 @@ async def maybe_offer_math_battle(
 
 
 
+
+ADVANCED_MATH_KEYWORDS = (
+    "integral", "integra", "integrar",
+    "derivada", "deriva", "derivar",
+    "seno", "coseno", "tangente",
+    "logaritmo", "log base", "ln ",
+    "factorial", "combinaciones", "combinacion",
+    "permutaciones", "permutacion",
+    "ecuacion", "ecuación",
+    "raiz cubica", "raiz cuarta", "valor absoluto",
+    "e elevado", "pi elevado",
+)
+
+
+def _advanced_math_clean_text(text_value: str) -> str:
+    raw = normalize_intent(text_value or "").lower()
+
+    for alias in sorted(PECOS_USERNAME_ALIASES, key=len, reverse=True):
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if alias_norm:
+            raw = re.sub(
+                rf"(?<![a-z0-9_])@?{re.escape(alias_norm)}(?![a-z0-9_])",
+                " ",
+                raw,
+            )
+
+    raw = re.sub(
+        r"(?<![a-z0-9_])(?:pecos|peco)(?![a-z0-9_])",
+        " ",
+        raw,
+    )
+    raw = raw.strip(" \t\r\n?¿!¡=.;:,")
+    raw = re.sub(
+        r"^\s*(?:"
+        r"dime\s+|"
+        r"me\s+dices\s+|"
+        r"me\s+puedes\s+decir\s+|"
+        r"cuanto\s+es\s+|"
+        r"cual\s+es\s+|"
+        r"calcula\s+|calcular\s+|"
+        r"resuelve\s+|resolver\s+"
+        r")",
+        "",
+        raw,
+    )
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _advanced_math_intent(text_value: str) -> bool:
+    if not text_value:
+        return False
+
+    normalized = normalize_intent(text_value).lower()
+    directed = text_mentions_pecos(text_value)
+
+    if directed and any(word in normalized for word in ADVANCED_MATH_KEYWORDS):
+        return True
+
+    # También permitir "Pecos resuelve 2x+5=17".
+    if directed and "=" in text_value and re.search(r"\bx\b", normalized):
+        return True
+
+    return False
+
+
+def _fraction_from_text(value: str) -> Fraction:
+    return Fraction(value.replace(",", "."))
+
+
+def _format_fraction(value: Fraction) -> str:
+    if value.denominator == 1:
+        return str(value.numerator)
+    return f"{value.numerator}/{value.denominator}"
+
+
+def _format_symbolic_term(
+    coeff: Fraction,
+    power: int,
+    *,
+    first: bool,
+) -> str:
+    if coeff == 0:
+        return ""
+
+    sign = "-" if coeff < 0 else "+"
+    abs_coeff = abs(coeff)
+
+    if power == 0:
+        body = _format_fraction(abs_coeff)
+    else:
+        if abs_coeff == 1:
+            coeff_text = ""
+        else:
+            coeff_text = _format_fraction(abs_coeff)
+
+        if power == 1:
+            var = "x"
+        else:
+            var = f"x^{power}"
+
+        if coeff_text:
+            body = f"{coeff_text}{var}"
+        else:
+            body = var
+
+    if first:
+        return f"-{body}" if sign == "-" else body
+    return f" {sign} {body}"
+
+
+def _format_polynomial(coeffs: dict[int, Fraction]) -> str:
+    parts: list[str] = []
+    first = True
+    for power in sorted(coeffs.keys(), reverse=True):
+        coeff = coeffs[power]
+        if coeff == 0:
+            continue
+        term = _format_symbolic_term(coeff, power, first=first)
+        if term:
+            parts.append(term)
+            first = False
+    return "".join(parts) if parts else "0"
+
+
+def _parse_polynomial(expression: str) -> dict[int, Fraction] | None:
+    """Parser conservador para polinomios reales en x de grado <= 12.
+
+    Acepta:
+      x
+      x^2
+      3x^2 + 2x - 5
+      4*x^3 - x
+      constantes
+    """
+    expr = normalize_intent(expression or "").lower()
+    expr = expr.replace("−", "-").replace("×", "*")
+    expr = re.sub(r"\s+", "", expr)
+    expr = re.sub(r"(?<=\d),(?=\d)", ".", expr)
+
+    # Frases comunes.
+    expr = re.sub(r"\belevadoala\b", "^", expr)
+    expr = re.sub(r"\belevadoa\b", "^", expr)
+    expr = expr.replace("alcuadrado", "^2")
+    expr = expr.replace("alcubo", "^3")
+
+    if not expr or len(expr) > 160:
+        return None
+
+    # No aceptar funciones dentro del parser polinómico.
+    if re.search(r"[a-wyz_]", expr):
+        return None
+
+    # Normalizar signos para dividir términos.
+    if expr[0] not in "+-":
+        expr = "+" + expr
+
+    terms = re.findall(r"[+-][^+-]+", expr)
+    if not terms or "".join(terms) != expr:
+        return None
+
+    result: dict[int, Fraction] = {}
+
+    for term in terms:
+        sign = -1 if term[0] == "-" else 1
+        body = term[1:]
+
+        if "x" not in body:
+            try:
+                coeff = Fraction(body) * sign
+            except Exception:
+                return None
+            result[0] = result.get(0, Fraction(0)) + coeff
+            continue
+
+        match = re.fullmatch(
+            r"(?:(\d+(?:\.\d+)?)\*?)?x(?:\^(\d{1,2}))?",
+            body,
+        )
+        if not match:
+            return None
+
+        coeff_text, power_text = match.groups()
+        coeff = Fraction(coeff_text) if coeff_text else Fraction(1)
+        coeff *= sign
+        power = int(power_text) if power_text else 1
+        if power > 12:
+            return None
+        result[power] = result.get(power, Fraction(0)) + coeff
+
+    return result
+
+
+def _differentiate_polynomial(coeffs: dict[int, Fraction]) -> dict[int, Fraction]:
+    out: dict[int, Fraction] = {}
+    for power, coeff in coeffs.items():
+        if power == 0:
+            continue
+        out[power - 1] = out.get(power - 1, Fraction(0)) + coeff * power
+    return out
+
+
+def _integrate_polynomial(coeffs: dict[int, Fraction]) -> dict[int, Fraction]:
+    out: dict[int, Fraction] = {}
+    for power, coeff in coeffs.items():
+        new_power = power + 1
+        out[new_power] = out.get(new_power, Fraction(0)) + coeff / new_power
+    return out
+
+
+def _advanced_math_symbolic(text_value: str) -> tuple[str, str] | None:
+    """Devuelve (respuesta, tipo) para cálculo simbólico conocido."""
+    query = _advanced_math_clean_text(text_value)
+
+    # -------------------------------
+    # INTEGRALES INDEFINIDAS
+    # -------------------------------
+    m = re.search(r"\b(?:la\s+)?(?:integral|integra|integrar)\s+(?:de\s+)?(.+)$", query)
+    if m:
+        expr = m.group(1).strip()
+        expr_compact = re.sub(r"\s+", "", expr)
+
+        # e elevado a la x / e^x
+        if re.fullmatch(
+            r"(?:e\^x|eelevadoalax|eelevadoax|e\*\*x)",
+            expr_compact,
+        ):
+            return (
+                "🧮 ∫ e^x dx = e^x + C\n"
+                "📘 Porque la derivada de e^x es nuevamente e^x. "
+                "C es la constante de integración.",
+                "integral",
+            )
+
+        if re.fullmatch(r"(?:sen(?:o)?(?:de)?x|sin(?:de)?x)", expr_compact):
+            return (
+                "🧮 ∫ sen(x) dx = -cos(x) + C",
+                "integral",
+            )
+
+        if re.fullmatch(r"(?:cos(?:eno)?(?:de)?x|cos(?:de)?x)", expr_compact):
+            return (
+                "🧮 ∫ cos(x) dx = sen(x) + C",
+                "integral",
+            )
+
+        if re.fullmatch(r"(?:1/x|x\^-1)", expr_compact):
+            return (
+                "🧮 ∫ 1/x dx = ln|x| + C",
+                "integral",
+            )
+
+        # Polinomios simples.
+        coeffs = _parse_polynomial(expr)
+        if coeffs is not None:
+            integrated = _format_polynomial(_integrate_polynomial(coeffs))
+            source = _format_polynomial(coeffs)
+            return (
+                f"🧮 ∫ ({source}) dx = {integrated} + C",
+                "integral",
+            )
+
+        return (
+            "🧮 Pecos reconoce que es una integral, pero esa forma todavía "
+            "queda fuera del motor simbólico seguro. Mejor no inventar una solución.",
+            "unsupported",
+        )
+
+    # -------------------------------
+    # DERIVADAS
+    # -------------------------------
+    m = re.search(r"\b(?:la\s+)?(?:derivada|deriva|derivar)\s+(?:de\s+)?(.+)$", query)
+    if m:
+        expr = m.group(1).strip()
+        expr_compact = re.sub(r"\s+", "", expr)
+
+        if re.fullmatch(
+            r"(?:e\^x|eelevadoalax|eelevadoax|e\*\*x)",
+            expr_compact,
+        ):
+            return ("🧮 d/dx (e^x) = e^x", "derivative")
+
+        if re.fullmatch(r"(?:sen(?:o)?(?:de)?x|sin(?:de)?x)", expr_compact):
+            return ("🧮 d/dx [sen(x)] = cos(x)", "derivative")
+
+        if re.fullmatch(r"(?:cos(?:eno)?(?:de)?x|cos(?:de)?x)", expr_compact):
+            return ("🧮 d/dx [cos(x)] = -sen(x)", "derivative")
+
+        if re.fullmatch(r"(?:ln(?:de)?x|logaritmonatural(?:de)?x)", expr_compact):
+            return ("🧮 d/dx [ln(x)] = 1/x", "derivative")
+
+        coeffs = _parse_polynomial(expr)
+        if coeffs is not None:
+            derivative = _format_polynomial(_differentiate_polynomial(coeffs))
+            source = _format_polynomial(coeffs)
+            return (
+                f"🧮 d/dx ({source}) = {derivative}",
+                "derivative",
+            )
+
+        return (
+            "🧮 Pecos reconoce que es una derivada, pero esa forma todavía "
+            "queda fuera del motor simbólico seguro. Mejor no inventar una solución.",
+            "unsupported",
+        )
+
+    return None
+
+
+def _advanced_math_numeric(text_value: str) -> tuple[str, float | int] | None:
+    query = _advanced_math_clean_text(text_value)
+    number = r"([+-]?\d+(?:[.,]\d+)?)"
+
+    # Trigonometría.
+    trig_specs = (
+        ("seno", math.sin),
+        ("sen", math.sin),
+        ("coseno", math.cos),
+        ("cos", math.cos),
+        ("tangente", math.tan),
+        ("tan", math.tan),
+    )
+    for label, func in trig_specs:
+        m = re.fullmatch(
+            rf"(?:el\s+)?{label}\s+(?:de\s+)?{number}(?:\s*(grados?|radianes?))?",
+            query,
+        )
+        if m:
+            raw_n = float(m.group(1).replace(",", "."))
+            unit = (m.group(2) or "radianes").lower()
+            angle = math.radians(raw_n) if unit.startswith("grado") else raw_n
+
+            if label in {"tangente", "tan"} and unit.startswith("grado"):
+                # Evitar reportar un número enorme cerca de 90° + k180°.
+                normalized_angle = ((raw_n - 90.0) % 180.0)
+                if min(normalized_angle, 180.0 - normalized_angle) < 1e-10:
+                    raise SafeMathError("la tangente no está definida en ese ángulo")
+
+            value = func(angle)
+            return (
+                f"{label}({raw_n:g} {'°' if unit.startswith('grado') else 'rad'})",
+                value,
+            )
+
+    # Logaritmo base 10.
+    m = re.fullmatch(rf"(?:logaritmo|log)\s+(?:de\s+)?{number}", query)
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        if n <= 0:
+            raise SafeMathError("el logaritmo requiere un número positivo")
+        return (f"log10({n:g})", math.log10(n))
+
+    # Logaritmo con base.
+    m = re.fullmatch(
+        rf"(?:logaritmo|log)\s+base\s+{number}\s+de\s+{number}",
+        query,
+    )
+    if m:
+        base = float(m.group(1).replace(",", "."))
+        n = float(m.group(2).replace(",", "."))
+        if n <= 0 or base <= 0 or abs(base - 1.0) < 1e-15:
+            raise SafeMathError("base o argumento inválido para el logaritmo")
+        return (f"log base {base:g} de {n:g}", math.log(n, base))
+
+    # Logaritmo natural.
+    m = re.fullmatch(
+        rf"(?:ln|logaritmo\s+natural)\s+(?:de\s+)?{number}",
+        query,
+    )
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        if n <= 0:
+            raise SafeMathError("ln requiere un número positivo")
+        return (f"ln({n:g})", math.log(n))
+
+    # Factorial.
+    m = re.fullmatch(r"factorial\s+(?:de\s+)?(\d{1,4})", query)
+    if m:
+        n = int(m.group(1))
+        if n > 170:
+            raise SafeMathError("factorial demasiado grande para este bot")
+        return (f"{n}!", math.factorial(n))
+
+    # Combinaciones n en r.
+    m = re.fullmatch(
+        r"(?:combinaciones|combinacion)\s+(?:de\s+)?(\d{1,5})\s+(?:en|tomados?\s+de)\s+(\d{1,5})",
+        query,
+    )
+    if m:
+        n, r = int(m.group(1)), int(m.group(2))
+        if r > n or n > 100000:
+            raise SafeMathError("valores inválidos para combinaciones")
+        return (f"C({n},{r})", math.comb(n, r))
+
+    # Permutaciones nPr.
+    m = re.fullmatch(
+        r"(?:permutaciones|permutacion)\s+(?:de\s+)?(\d{1,5})\s+(?:en|tomados?\s+de)\s+(\d{1,5})",
+        query,
+    )
+    if m:
+        n, r = int(m.group(1)), int(m.group(2))
+        if r > n or n > 100000:
+            raise SafeMathError("valores inválidos para permutaciones")
+        return (f"P({n},{r})", math.perm(n, r))
+
+    # Valor absoluto.
+    m = re.fullmatch(rf"valor\s+absoluto\s+(?:de\s+)?{number}", query)
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        return (f"|{n:g}|", abs(n))
+
+    # Raíz cúbica/cuarta/enésima.
+    m = re.fullmatch(rf"raiz\s+cubica\s+(?:de\s+)?{number}", query)
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        value = math.copysign(abs(n) ** (1 / 3), n)
+        return (f"∛{n:g}", value)
+
+    m = re.fullmatch(rf"raiz\s+cuarta\s+(?:de\s+)?{number}", query)
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        if n < 0:
+            raise SafeMathError("la raíz cuarta real requiere un número no negativo")
+        return (f"⁴√{n:g}", n ** 0.25)
+
+    m = re.fullmatch(rf"raiz\s+(\d{{1,2}})\s+de\s+{number}", query)
+    if m:
+        degree = int(m.group(1))
+        n = float(m.group(2).replace(",", "."))
+        if degree < 2 or degree > 20:
+            raise SafeMathError("grado de raíz fuera de rango")
+        if n < 0 and degree % 2 == 0:
+            raise SafeMathError("una raíz par real requiere un número no negativo")
+        value = math.copysign(abs(n) ** (1 / degree), n) if n < 0 else n ** (1 / degree)
+        return (f"raíz {degree} de {n:g}", value)
+
+    # Potencia en lenguaje natural.
+    m = re.fullmatch(
+        rf"{number}\s+elevado\s+a(?:\s+la)?\s+{number}",
+        query,
+    )
+    if m:
+        base = float(m.group(1).replace(",", "."))
+        exponent = float(m.group(2).replace(",", "."))
+        if abs(exponent) > MATH_MAX_ABS_EXPONENT:
+            raise SafeMathError("exponente demasiado grande")
+        if base < 0 and not exponent.is_integer():
+            raise SafeMathError("el resultado no es un número real")
+        result = base ** exponent
+        if not math.isfinite(float(result)):
+            raise SafeMathError("resultado fuera de rango")
+        return (f"{base:g}^{exponent:g}", result)
+
+    return None
+
+
+def _advanced_math_equation(text_value: str) -> str | None:
+    query = _advanced_math_clean_text(text_value)
+    if "=" not in query or "x" not in query:
+        return None
+
+    # Quitar la palabra ecuación si aparece.
+    query = re.sub(r"^\s*(?:ecuacion\s+)?", "", query)
+    if query.count("=") != 1:
+        return None
+
+    left_text, right_text = [part.strip() for part in query.split("=", 1)]
+    left = _parse_polynomial(left_text)
+    right = _parse_polynomial(right_text)
+    if left is None or right is None:
+        return None
+
+    coeffs: dict[int, Fraction] = {}
+    for power, coeff in left.items():
+        coeffs[power] = coeffs.get(power, Fraction(0)) + coeff
+    for power, coeff in right.items():
+        coeffs[power] = coeffs.get(power, Fraction(0)) - coeff
+
+    # Limpiar ceros.
+    coeffs = {p: c for p, c in coeffs.items() if c != 0}
+    if not coeffs:
+        return "🧮 La ecuación es una identidad: se cumple para cualquier x."
+
+    degree = max(coeffs)
+    if degree == 0:
+        return "🧮 La ecuación es incompatible: no tiene solución."
+
+    if degree == 1:
+        a = coeffs.get(1, Fraction(0))
+        b = coeffs.get(0, Fraction(0))
+        if a == 0:
+            return None
+        x = -b / a
+        return f"🧮 Solución: x = {_format_fraction(x)}"
+
+    if degree == 2:
+        a = float(coeffs.get(2, Fraction(0)))
+        b = float(coeffs.get(1, Fraction(0)))
+        c = float(coeffs.get(0, Fraction(0)))
+        if abs(a) < 1e-15:
+            return None
+
+        disc = b * b - 4 * a * c
+        if disc > 1e-12:
+            root = math.sqrt(disc)
+            x1 = (-b + root) / (2 * a)
+            x2 = (-b - root) / (2 * a)
+            return (
+                "🧮 Ecuación cuadrática:\n"
+                f"x₁ = {_format_math_number(x1)}\n"
+                f"x₂ = {_format_math_number(x2)}"
+            )
+
+        if abs(disc) <= 1e-12:
+            x = -b / (2 * a)
+            return f"🧮 Raíz doble: x = {_format_math_number(x)}"
+
+        real = -b / (2 * a)
+        imag = math.sqrt(-disc) / abs(2 * a)
+        sign = "+" if imag >= 0 else "-"
+        return (
+            "🧮 No tiene raíces reales. En números complejos:\n"
+            f"x₁ = {_format_math_number(real)} + {_format_math_number(abs(imag))}i\n"
+            f"x₂ = {_format_math_number(real)} - {_format_math_number(abs(imag))}i"
+        )
+
+    return (
+        "🧮 Pecos reconoce la ecuación, pero por seguridad automática "
+        "solo resuelve ecuaciones polinómicas de primer y segundo grado."
+    )
+
+
+async def handle_advanced_math(message: Message) -> bool:
+    """Matemática avanzada sin SymPy ni ejecución dinámica de código."""
+    user = message.from_user
+    if not user or user.is_bot:
+        return False
+
+    text_value = message.text or message.caption or ""
+    if not _advanced_math_intent(text_value):
+        return False
+
+    response: str | None = None
+    solved = False
+
+    try:
+        symbolic = _advanced_math_symbolic(text_value)
+        if symbolic is not None:
+            response, kind = symbolic
+            solved = kind != "unsupported"
+        else:
+            equation = _advanced_math_equation(text_value)
+            if equation is not None:
+                response = equation
+                solved = not equation.startswith("🧮 Pecos reconoce")
+            else:
+                numeric = _advanced_math_numeric(text_value)
+                if numeric is not None:
+                    label, result = numeric
+                    response = f"🧮 {label} = {_format_math_number(result)}"
+                    solved = True
+    except SafeMathError as exc:
+        await message.reply_text(
+            f"🧮 Esa operación avanzada no me cuadra, {display_name(message)}: {exc}."
+        )
+        return True
+    except (OverflowError, ValueError, ZeroDivisionError):
+        await message.reply_text(
+            f"🧮 Esa operación avanzada quedó fuera de rango, {display_name(message)}."
+        )
+        return True
+
+    if response is None:
+        await message.reply_text(
+            "🧮 Pecos reconoce una consulta de matemática avanzada, pero esa forma "
+            "todavía no está implementada con suficiente seguridad. Mejor no inventar."
+        )
+        return True
+
+    # Solo una solución matemática directa por usuario y por día.
+    # Si la consulta fue reconocida pero no resoluble, NO consume el cupo.
+    if solved:
+        today = datetime.now(BOT_TZ).strftime("%Y-%m-%d")
+        allowed = db.claim_daily_user_event(
+            MATH_DAILY_EVENT_KEY,
+            int(user.id),
+            user.username or str(user.id),
+            today,
+        )
+
+        if not allowed:
+            await message.reply_text(
+                choose_random(
+                    f"math_daily_limit:{user.id}",
+                    MATH_DAILY_LIMIT_MESSAGES,
+                    display_name(message),
+                )
+            )
+            db.add_history(
+                f"CALCULO AVANZADO LIMITADO | {display_name(message)} | "
+                f"chat {message.chat_id} | fecha {today}"
+            )
+            return True
+
+    await message.reply_text(response)
+    db.add_history(
+        f"MATEMATICA AVANZADA | {display_name(message)} | "
+        f"chat {message.chat_id} | consulta={text_value[:220]}"
+    )
+    return True
+
+
 def pecos_math_help_intent(text_value: str) -> bool:
     if not text_value or not text_mentions_pecos(text_value):
         return False
@@ -11773,7 +12385,15 @@ async def handle_math_help(message: Message) -> bool:
         "• Pecos cual es el doble de 18\n"
         "• Pecos cual es la mitad de 90\n"
         "• Pecos 15 por ciento de 800\n"
-        "• Pecos raiz cuadrada de 144\n\n"
+        "• Pecos raiz cuadrada de 144\n"
+        "• Pecos seno de 30 grados\n"
+        "• Pecos logaritmo base 2 de 8\n"
+        "• Pecos factorial de 8\n"
+        "• Pecos integral de e elevado a la x\n"
+        "• Pecos integral de 3x^2 + 2x - 5\n"
+        "• Pecos derivada de x^3 + 4x\n"
+        "• Pecos resuelve 2x + 5 = 17\n"
+        "• Pecos resuelve x^2 - 5x + 6 = 0\n\n"
         "También puedes retarme con «Pecos reto matematico» para iniciar la guerra matemática. 🤠"
     )
     return True
@@ -12946,6 +13566,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # Ayuda y cálculo matemático seguro: una respuesta por usuario y por día.
         # La ayuda no consume el cálculo diario.
         if await handle_math_help(message):
+            return
+
+        # Matemática avanzada: cálculo simbólico y funciones especiales.
+        if await handle_advanced_math(message):
             return
 
         if await handle_safe_math(message):
