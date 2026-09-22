@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.39-mirror-math-challenge"
+VERSION = "2.8.40-math-battle-pause-after-timeout"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -666,6 +666,7 @@ MATH_DAILY_EVENT_KEY = "math_calculation"
 MATH_BATTLE_TRIGGER_COUNT = 3
 MATH_BATTLE_TRIGGER_WINDOW_SECONDS = 10 * 60
 MATH_BATTLE_ACCEPT_WINDOW_SECONDS = 2 * 60
+MATH_BATTLE_CONTINUE_WINDOW_SECONDS = 2 * 60
 MATH_BATTLE_OFFER_COOLDOWN_SECONDS = 30 * 60
 MATH_BATTLE_TOTAL_ROUNDS = 5
 MATH_BATTLE_ROUNDS = (
@@ -11068,10 +11069,11 @@ def _math_battle_declines(text_value: str) -> bool:
 
 
 def _math_battle_cancel_task(state: dict) -> None:
-    task = state.get("timeout_task")
-    if task and not task.done():
-        task.cancel()
-    state["timeout_task"] = None
+    for key in ("timeout_task", "continue_timeout_task"):
+        task = state.get(key)
+        if task and not task.done():
+            task.cancel()
+        state[key] = None
 
 
 def _math_battle_generate_question(difficulty: str) -> tuple[str, int]:
@@ -11221,6 +11223,8 @@ async def _math_battle_ask_round(bot, key: tuple[int, int]) -> None:
     state["expression"] = expression
     state["answer"] = answer
     state["awaiting_answer"] = False
+    state["awaiting_continue"] = False
+    state["continue_timeout_task"] = None
 
     icon = "🟢" if difficulty == "Fácil" else "🟡" if difficulty == "Media" else "🔴"
     await bot.send_message(
@@ -11238,6 +11242,44 @@ async def _math_battle_ask_round(bot, key: tuple[int, int]) -> None:
     state["awaiting_answer"] = True
     state["timeout_task"] = asyncio.create_task(
         _math_battle_timeout(bot, key, round_index, serial, seconds)
+    )
+
+
+
+def _math_battle_continue_requested(text_value: str) -> bool:
+    value = _math_battle_normalized_reply(text_value)
+    continue_words = {
+        "siguiente", "continuar", "continua", "continúa",
+        "vamos", "dale", "sigue", "seguimos", "otra",
+        "proxima", "próxima", "proxima ronda", "próxima ronda",
+    }
+    return value in continue_words
+
+
+async def _math_battle_continue_expiry(
+    key: tuple[int, int],
+    expected_round_index: int,
+) -> None:
+    """Cancela silenciosamente una partida abandonada tras 2 minutos."""
+    try:
+        await asyncio.sleep(MATH_BATTLE_CONTINUE_WINDOW_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    state = MATH_BATTLE_ACTIVE.get(key)
+    if not state:
+        return
+
+    if int(state.get("round_index", -1)) != expected_round_index:
+        return
+    if not state.get("awaiting_continue"):
+        return
+
+    usuario = str(state.get("usuario") or "partner")
+    MATH_BATTLE_ACTIVE.pop(key, None)
+    db.add_history(
+        f"GUERRA MATEMATICA EXPIRADA EN PAUSA | {usuario} | "
+        f"chat {key[0]} | ronda_siguiente={expected_round_index + 1}"
     )
 
 
@@ -11267,19 +11309,41 @@ async def _math_battle_timeout(
     state["timeout_task"] = None
     state["pecos_score"] = int(state.get("pecos_score", 0)) + 1
 
+    next_round_index = round_index + 1
+    state["round_index"] = next_round_index
+
+    # Si era la última ronda, se cierra normalmente.
+    if next_round_index >= MATH_BATTLE_TOTAL_ROUNDS:
+        await bot.send_message(
+            chat_id=key[0],
+            text=(
+                f"⏱️ Tiempo, partner. Punto para Pecos. 🤠\n"
+                f"Resultado correcto: {state['answer']}.\n"
+                f"Marcador: {state['usuario']} {state['user_score']} — "
+                f"Pecos {state['pecos_score']}"
+            ),
+        )
+        await asyncio.sleep(0.5)
+        await _math_battle_finish(bot, key)
+        return
+
+    # En cualquier otra ronda, Pecos se detiene aquí. No vuelve a enviar
+    # preguntas por sí solo hasta que EL MISMO jugador pida continuar.
+    state["awaiting_continue"] = True
+    state["continue_timeout_task"] = asyncio.create_task(
+        _math_battle_continue_expiry(key, next_round_index)
+    )
+
     await bot.send_message(
         chat_id=key[0],
         text=(
             f"⏱️ Tiempo, partner. Punto para Pecos. 🤠\n"
             f"Resultado correcto: {state['answer']}.\n"
             f"Marcador: {state['usuario']} {state['user_score']} — "
-            f"Pecos {state['pecos_score']}"
+            f"Pecos {state['pecos_score']}\n\n"
+            "▶️ Escribe «siguiente» para continuar la batalla."
         ),
     )
-
-    state["round_index"] = round_index + 1
-    await asyncio.sleep(0.8)
-    await _math_battle_ask_round(bot, key)
 
 
 async def _math_battle_start(
@@ -11300,7 +11364,9 @@ async def _math_battle_start(
         "user_score": 0,
         "pecos_score": 0,
         "awaiting_answer": False,
+        "awaiting_continue": False,
         "timeout_task": None,
+        "continue_timeout_task": None,
     }
 
     await message.reply_text(
@@ -11328,10 +11394,17 @@ async def handle_math_battle_message(
     # matemática, la batalla comienza inmediatamente.
     if _math_battle_direct_challenge_requested(text_value):
         if key in MATH_BATTLE_ACTIVE:
-            await message.reply_text(
-                "⚔️ Partner, ya estamos en plena guerra matemática. "
-                "Primero responde la ronda actual. 😎"
-            )
+            active_state = MATH_BATTLE_ACTIVE[key]
+            if active_state.get("awaiting_continue"):
+                await message.reply_text(
+                    "⚔️ Partner, esa guerra sigue abierta. "
+                    "Escribe «siguiente» para pasar a la próxima ronda. 😎"
+                )
+            else:
+                await message.reply_text(
+                    "⚔️ Partner, ya estamos en plena guerra matemática. "
+                    "Primero responde la ronda actual. 😎"
+                )
             return True
 
         MATH_BATTLE_PENDING.pop(key, None)
@@ -11355,6 +11428,31 @@ async def handle_math_battle_message(
                 "🏳️ Guerra matemática terminada. Pecos guarda el ábaco y volvemos a los radios. 🤠"
             )
             return True
+
+        # Después de agotar el tiempo, Pecos NO lanza otra ronda solo.
+        # Únicamente el mismo jugador puede reanudar escribiendo "siguiente"
+        # (o una variante equivalente). Si no lo hace en 2 minutos, la partida
+        # desaparece silenciosamente.
+        if state.get("awaiting_continue"):
+            if _math_battle_continue_requested(text_value):
+                task = state.get("continue_timeout_task")
+                if task and not task.done():
+                    task.cancel()
+                state["continue_timeout_task"] = None
+                state["awaiting_continue"] = False
+                await _math_battle_ask_round(context.bot, key)
+                return True
+
+            # Si manda una respuesta numérica tardía, aclaramos que esa ronda
+            # ya terminó, pero no iniciamos otra.
+            if _math_battle_parse_answer(text_value) is not None:
+                await message.reply_text(
+                    "⏱️ Esa ronda ya cerró, partner. "
+                    "Escribe «siguiente» si quieres continuar."
+                )
+                return True
+
+            return False
 
         if not state.get("awaiting_answer"):
             return False
