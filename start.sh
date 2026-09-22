@@ -7,17 +7,27 @@ set -eu
 
 ROOT_DATA="${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
 
-# Estado pequeño y persistente del servidor Bot API.
+# Estado persistente del Telegram Bot API.
 TELEGRAM_STATE="${ROOT_DATA}/telegram-bot-api-state"
 
-# Los archivos grandes van únicamente al disco efímero del contenedor.
+# Archivos grandes únicamente en almacenamiento efímero.
 TELEGRAM_FILES="/tmp/telegram-bot-api-files"
 TELEGRAM_TEMP="/tmp/telegram-bot-api-temp"
 
-mkdir -p "${ROOT_DATA}" "${TELEGRAM_STATE}"
+# Log persistente para detectar el error real de Pecos.
+PECOS_ERROR_LOG="${ROOT_DATA}/pecos_boot_error.log"
 
-rm -rf "${TELEGRAM_FILES}" "${TELEGRAM_TEMP}"
-mkdir -p "${TELEGRAM_FILES}" "${TELEGRAM_TEMP}"
+mkdir -p \
+    "${ROOT_DATA}" \
+    "${TELEGRAM_STATE}"
+
+rm -rf \
+    "${TELEGRAM_FILES}" \
+    "${TELEGRAM_TEMP}"
+
+mkdir -p \
+    "${TELEGRAM_FILES}" \
+    "${TELEGRAM_TEMP}"
 
 chown -R telegram-bot-api:telegram-bot-api \
     "${TELEGRAM_STATE}" \
@@ -33,6 +43,7 @@ rm -f \
 export LOCAL_BOT_API=1
 export LOCAL_BOT_API_URL="http://127.0.0.1:8081"
 export TELEGRAM_FILES_DIR="${TELEGRAM_FILES}"
+export PYTHONUNBUFFERED=1
 
 TELEGRAM_PID=""
 PECOS_PID=""
@@ -67,13 +78,20 @@ import time
 
 for _ in range(120):
     try:
-        with socket.create_connection(("127.0.0.1", 8081), timeout=1):
-            print("[BOT API] Servidor local listo.")
+        with socket.create_connection(
+            ("127.0.0.1", 8081),
+            timeout=1
+        ):
+            print("[BOT API] Servidor local listo.", flush=True)
             sys.exit(0)
+
     except OSError:
         time.sleep(0.5)
 
-print("[BOT API] ERROR: no inició en el tiempo esperado.")
+print(
+    "[BOT API] ERROR: no inició en el tiempo esperado.",
+    flush=True
+)
 sys.exit(1)
 PY
 }
@@ -92,30 +110,91 @@ cleanup() {
     wait 2>/dev/null || true
 }
 
+show_pecos_error() {
+    echo ""
+    echo "=================================================="
+    echo " DIAGNOSTICO DE PECOS"
+    echo "=================================================="
+
+    if [ -f "${PECOS_ERROR_LOG}" ]; then
+        cat "${PECOS_ERROR_LOG}"
+    else
+        echo "No se encontró ${PECOS_ERROR_LOG}"
+        echo "El proceso terminó sin generar traceback."
+    fi
+
+    echo "=================================================="
+    echo ""
+}
+
 trap cleanup INT TERM EXIT
 
 echo "=============================================="
-echo " Pecos Paul Kele 2.4.0 - duplicados final"
+echo " Pecos Paul Kele - MODO DIAGNOSTICO"
 echo "=============================================="
 echo "Datos persistentes: ${ROOT_DATA}"
 echo "Estado Bot API:     ${TELEGRAM_STATE}"
 echo "Archivos Bot API:   ${TELEGRAM_FILES} (efímero)"
+echo "Log diagnóstico:    ${PECOS_ERROR_LOG}"
+
+# Confirmar que están ambos archivos.
+if [ ! -f /app/main.py ]; then
+    echo "[PECOS] ERROR: no existe /app/main.py"
+    exit 1
+fi
+
+if [ ! -f /app/boot_diag.py ]; then
+    echo "[PECOS] ERROR: no existe /app/boot_diag.py"
+    echo "[PECOS] Debes subir boot_diag.py al repositorio."
+    exit 1
+fi
+
+# Borrar solamente el diagnóstico anterior.
+# NO toca pecos.db ni ningún dato de Pecos.
+rm -f "${PECOS_ERROR_LOG}"
 
 start_telegram_api
 wait_for_telegram_api
 
-echo "[PECOS] Iniciando main.py..."
-python3 -u /app/main.py &
+echo "[PECOS] Iniciando main.py mediante boot_diag.py..."
+
+python3 -u /app/boot_diag.py &
 PECOS_PID=$!
 
+echo "[PECOS] PID: ${PECOS_PID}"
+
 while true; do
+
+    # ---------------------------------------------------------
+    # PECOS
+    # ---------------------------------------------------------
     if ! kill -0 "${PECOS_PID}" 2>/dev/null; then
-        echo "ERROR: Pecos se detuvo. Railway reiniciará el contenedor."
+
+        PECOS_RC=0
+
+        if wait "${PECOS_PID}"; then
+            PECOS_RC=0
+        else
+            PECOS_RC=$?
+        fi
+
+        echo ""
+        echo "[PECOS] ERROR: el proceso se detuvo."
+        echo "[PECOS] Código de salida: ${PECOS_RC}"
+
+        show_pecos_error
+
+        echo "Railway reiniciará el contenedor."
         exit 1
     fi
 
+    # ---------------------------------------------------------
+    # TELEGRAM BOT API
+    # ---------------------------------------------------------
     if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
-        echo "[BOT API] El proceso se detuvo. Reiniciando con el mismo estado..."
+        echo "[BOT API] El proceso se detuvo."
+        echo "[BOT API] Reiniciando con el mismo estado..."
+
         start_telegram_api
         wait_for_telegram_api
     fi
