@@ -69,7 +69,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.38-active-users-timedelta-fix"
+VERSION = "2.8.39-mirror-math-challenge"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -10927,6 +10927,127 @@ def _math_battle_direct_challenge_requested(text_value: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in patterns)
 
 
+
+MIRROR_SPANISH_HINTS = {
+    "hola", "ola", "quien", "quién", "tiene", "tienen", "busca", "buscar",
+    "necesito", "necesita", "alguien", "ayuda", "ayudar", "radio", "radios",
+    "software", "programa", "programar", "cps", "kpg", "firmware", "manual",
+    "pass", "password", "clave", "claves", "contrasena", "contraseña",
+    "salta", "saltar", "para", "por", "favor", "gracias", "pecos", "buenas",
+    "buenos", "dias", "días", "noches", "tardes", "como", "cómo", "que", "qué",
+    "donde", "dónde", "cuando", "cuándo", "cuanto", "cuánto", "modelo", "kenwood",
+    "motorola", "hytera", "archivo", "archivos", "tengo", "quiero", "puede",
+    "puedes", "sabe", "sabes", "sirve", "funciona", "funcionar",
+}
+
+
+def _mirror_reverse_token(token: str) -> str:
+    """Invierte solo la parte alfanumérica y conserva puntuación exterior."""
+    match = re.fullmatch(r"([^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]*)(.*?)([^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]*)", token)
+    if not match:
+        return token
+
+    prefix, core, suffix = match.groups()
+    if not core:
+        return token
+
+    reversed_core = core[::-1]
+
+    # El ejemplo histórico del grupo usa "Oal" para representar "Ola".
+    # La inversión literal produce "laO"; normalizamos solo este saludo
+    # específico para respetar la intención del usuario.
+    if reversed_core.lower() == "lao":
+        reversed_core = "Ola" if core[:1].isupper() else "ola"
+
+    return prefix + reversed_core + suffix
+
+
+def pecos_decode_mirror_text(text_value: str) -> str | None:
+    """Intenta leer un mensaje escrito con cada palabra al revés.
+
+    Se activa solo con evidencia suficiente para no interpretar conversaciones
+    normales como "espejo".
+    """
+    raw = (text_value or "").strip()
+    if not raw or len(raw) > 400:
+        return None
+
+    tokens = raw.split()
+    if len(tokens) < 3:
+        return None
+
+    decoded_tokens = [_mirror_reverse_token(token) for token in tokens]
+    decoded = " ".join(decoded_tokens)
+
+    original_words = [
+        normalize_intent(token).strip(".,;:!?¡¿()[]{}\"'").lower()
+        for token in tokens
+    ]
+    decoded_words = [
+        normalize_intent(token).strip(".,;:!?¡¿()[]{}\"'").lower()
+        for token in decoded_tokens
+    ]
+
+    original_score = sum(word in MIRROR_SPANISH_HINTS for word in original_words)
+    decoded_score = sum(word in MIRROR_SPANISH_HINTS for word in decoded_words)
+
+    # Al menos 3 palabras deben volverse reconocibles y la lectura invertida
+    # debe ser claramente mejor que la original.
+    if decoded_score < 3:
+        return None
+    if decoded_score <= original_score + 1:
+        return None
+
+    return decoded
+
+
+async def handle_mirror_math_challenge(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Lee texto invertido, bromea y desafía al autor a la guerra matemática."""
+    if not message.text:
+        return False
+
+    decoded = pecos_decode_mirror_text(message.text)
+    if not decoded:
+        return False
+
+    key = _math_battle_key(message)
+    if key is None:
+        return False
+
+    # Si ya hay una batalla activa, no se superpone otra.
+    if key in MATH_BATTLE_ACTIVE:
+        await message.reply_text(
+            f"🪞 Te entendí, {display_name(message)}: «{decoded}».\n"
+            "😎 Bonito intento con el espejo, pero primero termina la guerra matemática que ya tenemos."
+        )
+        return True
+
+    now = time.monotonic()
+    MATH_BATTLE_UNKNOWN_TIMES.pop(key, None)
+    MATH_BATTLE_COOLDOWN_UNTIL.pop(key, None)
+    MATH_BATTLE_PENDING[key] = {
+        "expires_at": now + MATH_BATTLE_ACCEPT_WINDOW_SECONDS,
+        "usuario": display_name(message),
+        "source": "mirror",
+        "decoded": decoded,
+    }
+
+    await message.reply_text(
+        f"🪞 Pecos también sabe leer al revés, {display_name(message)}.\n"
+        f"Yo leo: «{decoded}».\n\n"
+        "🤠 Ya que vienes jugando con el espejo, te desafío a una guerra matemática: "
+        "5 rondas, sin calculadora. ¿Aceptas?"
+    )
+    db.add_history(
+        f"TEXTO ESPEJO + DESAFIO | {display_name(message)} | "
+        f"original={message.text[:180]} | decodificado={decoded[:180]}"
+    )
+    return True
+
+
 def _math_battle_accepts(text_value: str) -> bool:
     value = _math_battle_normalized_reply(text_value)
     accepted = {
@@ -11302,10 +11423,18 @@ async def handle_math_battle_message(
             return True
 
         if _math_battle_declines(text_value):
+            pending_source = str(pending.get("source") or "")
             MATH_BATTLE_PENDING.pop(key, None)
-            await message.reply_text(
-                "🤠 Trato hecho. Pecos guarda el desafío y volvemos al tema de los radios."
-            )
+
+            if pending_source == "mirror":
+                await message.reply_text(
+                    "🐔 Jajaja… mucho mensaje en espejo, pero para las matemáticas "
+                    "salió cobarde el partner. Pecos toma nota. 🤠"
+                )
+            else:
+                await message.reply_text(
+                    "🤠 Trato hecho. Pecos guarda el desafío y volvemos al tema de los radios."
+                )
             return True
 
     return False
@@ -12497,8 +12626,16 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_internal_joke(message):
             return
 
-    # Guerra matemática: puede iniciarse explícitamente ("desafío matemático a Pecos")
-    # o por la invitación automática tras varias preguntas fuera de alcance.
+    # Texto escrito "en espejo": Pecos intenta leer cada palabra al revés.
+    # Si la detección es segura, muestra la lectura y reta al autor a la guerra
+    # matemática. Funciona aunque el mensaje original no nombre a Pecos.
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if await handle_mirror_math_challenge(message, context):
+            return
+
+    # Guerra matemática: puede iniciarse explícitamente ("desafío matemático a Pecos"),
+    # por una invitación automática tras preguntas fuera de alcance o por un
+    # desafío surgido de un mensaje en espejo.
     # Si existe una invitación pendiente o una partida activa, sus respuestas
     # tienen prioridad. El minijuego es independiente del límite diario de cálculo.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
