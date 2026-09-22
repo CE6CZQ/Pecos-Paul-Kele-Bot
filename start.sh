@@ -3,19 +3,16 @@ set -eu
 
 : "${BOT_TOKEN:?Falta BOT_TOKEN}"
 : "${TELEGRAM_API_ID:?Falta TELEGRAM_API_ID}"
-: "${TELEGRAM_API_HASH:?Falta TELEGRAM_API_HASH}"
+: "${TELEGRAM_API_HASH:?Falta TELELEGRAM_API_HASH}"
 
 ROOT_DATA="${RAILWAY_VOLUME_MOUNT_PATH:-/data}"
 
-# Estado persistente del Telegram Bot API.
+# Estado persistente del servidor Telegram Bot API.
 TELEGRAM_STATE="${ROOT_DATA}/telegram-bot-api-state"
 
-# Archivos grandes únicamente en almacenamiento efímero.
+# Archivos temporales del Bot API.
 TELEGRAM_FILES="/tmp/telegram-bot-api-files"
 TELEGRAM_TEMP="/tmp/telegram-bot-api-temp"
-
-# Log persistente para detectar el error real de Pecos.
-PECOS_ERROR_LOG="${ROOT_DATA}/pecos_boot_error.log"
 
 mkdir -p \
     "${ROOT_DATA}" \
@@ -82,7 +79,10 @@ for _ in range(120):
             ("127.0.0.1", 8081),
             timeout=1
         ):
-            print("[BOT API] Servidor local listo.", flush=True)
+            print(
+                "[BOT API] Servidor local listo.",
+                flush=True
+            )
             sys.exit(0)
 
     except OSError:
@@ -110,66 +110,29 @@ cleanup() {
     wait 2>/dev/null || true
 }
 
-show_pecos_error() {
-    echo ""
-    echo "=================================================="
-    echo " DIAGNOSTICO DE PECOS"
-    echo "=================================================="
-
-    if [ -f "${PECOS_ERROR_LOG}" ]; then
-        cat "${PECOS_ERROR_LOG}"
-    else
-        echo "No se encontró ${PECOS_ERROR_LOG}"
-        echo "El proceso terminó sin generar traceback."
-    fi
-
-    echo "=================================================="
-    echo ""
-}
-
 trap cleanup INT TERM EXIT
 
 echo "=============================================="
-echo " Pecos Paul Kele - MODO DIAGNOSTICO"
+echo " Pecos Paul Kele"
 echo "=============================================="
 echo "Datos persistentes: ${ROOT_DATA}"
 echo "Estado Bot API:     ${TELEGRAM_STATE}"
 echo "Archivos Bot API:   ${TELEGRAM_FILES} (efímero)"
-echo "Log diagnóstico:    ${PECOS_ERROR_LOG}"
-
-# Confirmar que están ambos archivos.
-if [ ! -f /app/main.py ]; then
-    echo "[PECOS] ERROR: no existe /app/main.py"
-    exit 1
-fi
-
-if [ ! -f /app/boot_diag.py ]; then
-    echo "[PECOS] ERROR: no existe /app/boot_diag.py"
-    echo "[PECOS] Debes subir boot_diag.py al repositorio."
-    exit 1
-fi
-
-# Borrar solamente el diagnóstico anterior.
-# NO toca pecos.db ni ningún dato de Pecos.
-rm -f "${PECOS_ERROR_LOG}"
 
 start_telegram_api
 wait_for_telegram_api
 
-echo "[PECOS] Iniciando main.py mediante boot_diag.py..."
+echo "[PECOS] Iniciando main.py..."
 
-python3 -u /app/boot_diag.py &
+python3 -u /app/main.py &
 PECOS_PID=$!
 
 echo "[PECOS] PID: ${PECOS_PID}"
 
 while true; do
 
-    # ---------------------------------------------------------
-    # PECOS
-    # ---------------------------------------------------------
+    # Verificar Pecos.
     if ! kill -0 "${PECOS_PID}" 2>/dev/null; then
-
         PECOS_RC=0
 
         if wait "${PECOS_PID}"; then
@@ -178,19 +141,14 @@ while true; do
             PECOS_RC=$?
         fi
 
-        echo ""
         echo "[PECOS] ERROR: el proceso se detuvo."
         echo "[PECOS] Código de salida: ${PECOS_RC}"
+        echo "[PECOS] Railway reiniciará el contenedor."
 
-        show_pecos_error
-
-        echo "Railway reiniciará el contenedor."
         exit 1
     fi
 
-    # ---------------------------------------------------------
-    # TELEGRAM BOT API
-    # ---------------------------------------------------------
+    # Verificar Telegram Bot API.
     if ! kill -0 "${TELEGRAM_PID}" 2>/dev/null; then
         echo "[BOT API] El proceso se detuvo."
         echo "[BOT API] Reiniciando con el mismo estado..."
