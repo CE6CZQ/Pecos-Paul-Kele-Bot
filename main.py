@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.47-night-technical-context-fix"
+VERSION = "2.8.48-pecos-first-help-gate"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -3695,6 +3695,38 @@ def telegram_member_status_label(status: str) -> str:
 
 PECOS_USERNAME_ALIASES = {"pecos_paul_kele_bot"}
 
+# AYUDA/CONSULTAS: cuando está activo, Pecos solo interviene si el mensaje
+# comienza nombrándolo: "Pecos ...", "Peco ..." o "@Pecos_Paul_Kele_Bot ...".
+# No afecta duplicados, moderación, aprendizaje histórico ni tareas admin.
+PECOS_HELP_REQUIRE_NAME_FIRST = True
+
+
+def text_starts_with_pecos(text_value: str) -> bool:
+    """True si Pecos/Peco/@username es el primer vocativo del mensaje."""
+    raw = (text_value or "").strip()
+    if not raw:
+        return False
+
+    normalized = normalize_intent(raw).lower().strip()
+
+    if re.match(r"^(?:pecos|peco)(?![a-z0-9_])", normalized):
+        return True
+
+    for alias in PECOS_USERNAME_ALIASES:
+        alias_norm = normalize_intent(alias).lower().lstrip("@")
+        if not alias_norm:
+            continue
+        if re.match(rf"^@?{re.escape(alias_norm)}(?![a-z0-9_])", normalized):
+            return True
+
+    return False
+
+
+def pecos_help_invocation_allowed(text_value: str) -> bool:
+    if PECOS_HELP_REQUIRE_NAME_FIRST:
+        return text_starts_with_pecos(text_value)
+    return text_mentions_pecos(text_value)
+
 
 def text_mentions_pecos(text_value: str) -> bool:
     """
@@ -4076,6 +4108,11 @@ async def handle_repeated_question(
         current_text,
         current_signature,
     )
+
+    # Se conserva el aprendizaje pasivo, pero Pecos no interrumpe una
+    # conversación humana si no fue llamado al comienzo del mensaje.
+    if not pecos_help_invocation_allowed(current_text):
+        return False
 
     if best is None or best_score < QUESTION_SIMILARITY_THRESHOLD:
         return False
@@ -6021,7 +6058,7 @@ def archive_query_needs_target(query: str, terms: list[str] | None = None) -> bo
 
 def archive_query_from_natural_text(text_value: str) -> str | None:
     normalized = normalize_intent(text_value or "").strip()
-    if not text_mentions_pecos(text_value):
+    if not pecos_help_invocation_allowed(text_value):
         return None
 
     # Primero usamos el parser técnico estructurado. Esto permite ignorar
@@ -6524,7 +6561,7 @@ async def maybe_offer_related_files(
 ) -> bool:
     if not message.text:
         return False
-    if text_mentions_pecos(message.text):
+    if not pecos_help_invocation_allowed(message.text):
         return False
     if len(message.text) > 350:
         return False
@@ -13051,7 +13088,7 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     normalized = normalize_intent(message.text).strip()
 
-    if not text_mentions_pecos(message.text):
+    if not pecos_help_invocation_allowed(message.text):
         return False
 
     usuario = display_name(message)
@@ -13910,20 +13947,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ):
         await capture_answer_to_known_question(message, context)
 
-        # Consulta pública de actividad actual observada.
-        # No requiere ser administrador.
-        if await handle_current_group_activity(message, context):
-            return
+        # AYUDA TÉCNICA: Pecos solo responde si su nombre aparece primero.
+        # El aprendizaje histórico de arriba sigue funcionando con todas
+        # las conversaciones del grupo.
+        if pecos_help_invocation_allowed(message.text or message.caption or ""):
+            if await handle_current_group_activity(message, context):
+                return
 
-        if await handle_kpg_compatibility_question(message, context):
-            return
+            if await handle_kpg_compatibility_question(message, context):
+                return
 
-        if await handle_radio_software_association(message, context):
-            return
+            if await handle_radio_software_association(message, context):
+                return
 
-        if await handle_autonomous_technical_memory(message, context):
-            return
+            if await handle_autonomous_technical_memory(message, context):
+                return
 
+        # Esta función guarda preguntas aunque Pecos no haya sido llamado,
+        # pero solo emite aviso si fue invocado al inicio.
         if await handle_repeated_question(message, context):
             return
 
@@ -13953,23 +13994,35 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if await handle_math_battle_message(message, context):
             return
 
-    # Preguntas/respuestas configuradas por el administrador tienen prioridad
-    # sobre búsquedas técnicas y respuestas genéricas de Pecos.
+    # Preguntas/respuestas y matemáticas: las consultas NUEVAS requieren
+    # "Pecos ..." al comienzo. Una sucesión ya pendiente conserva su
+    # respuesta de seguimiento sin obligar a repetir el nombre.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if await handle_custom_qa(message):
-            return
+        help_invoked_first = pecos_help_invocation_allowed(
+            message.text or message.caption or ""
+        )
+        pending_sequence_reply = (
+            _arithmetic_sequence_pending_active(message) is not None
+        )
 
-        # Ayuda y cálculo matemático seguro: una respuesta por usuario y por día.
-        # La ayuda no consume el cálculo diario.
-        if await handle_math_help(message):
-            return
+        if help_invoked_first:
+            if await handle_custom_qa(message):
+                return
 
-        # Matemática avanzada: cálculo simbólico y funciones especiales.
-        if await handle_advanced_math(message):
-            return
+            # Ayuda y cálculo matemático seguro: una respuesta por usuario y por día.
+            # La ayuda no consume el cálculo diario.
+            if await handle_math_help(message):
+                return
 
-        if await handle_safe_math(message):
-            return
+            if await handle_advanced_math(message):
+                return
+
+            if await handle_safe_math(message):
+                return
+        elif pending_sequence_reply:
+            # Continuación de una consulta iniciada previamente con Pecos.
+            if await handle_advanced_math(message):
+                return
 
     if await handle_identity(message, context):
         return
@@ -13984,10 +14037,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if await handle_direct_pecos_mention(message):
+        # Si Pecos fue llamado al comienzo, primero intenta una ayuda técnica
+        # relacionada antes de caer en el fallback social/humorístico.
+        if await maybe_offer_related_files(message, context):
             return
 
-        if await maybe_offer_related_files(message, context):
+        if await handle_direct_pecos_mention(message):
             return
 
         if await handle_contextual_phrase(message):
