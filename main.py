@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.46-arithmetic-sequence-followup"
+VERSION = "2.8.47-night-technical-context-fix"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -4941,6 +4941,7 @@ TECHNICAL_MODEL_RULES: tuple[tuple[str, str], ...] = (
     ("PRO", r"\bPRO\s*(\d{4,5})\b"),
     ("DGM", r"\bDGM\s*(\d{4}[A-Z]?)\b"),
     ("DEM", r"\bDEM\s*(\d{3,4}[A-Z]?)\b"),
+    ("SLR", r"\bSLR\s*(\d{3,5}[A-Z]?)\b"),
     ("PD",  r"\bPD\s*(\d{3,4})\b"),
     ("HP",  r"\bHP\s*(\d{3,4})\b"),
     ("HM",  r"\bHM\s*(\d{3,4})\b"),
@@ -5287,6 +5288,7 @@ TECHNICAL_QUERY_MODEL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("PRO", r"\bPRO[-_ ]?(\d{4,5})\b"),
     ("DGM", r"\bDGM[-_ ]?(\d{4}[A-Z]?)\b"),
     ("DEM", r"\bDEM[-_ ]?(\d{3,4}[A-Z]?)\b"),
+    ("SLR", r"\bSLR[-_ ]?(\d{3,5}[A-Z]?)\b"),
     ("PD",  r"\bPD[-_ ]?(\d{3,4})\b"),
     ("HP",  r"\bHP[-_ ]?(\d{3,4})\b"),
     ("HM",  r"\bHM[-_ ]?(\d{3,4})\b"),
@@ -5523,7 +5525,7 @@ def technical_query_interpret(query: str) -> dict[str, object]:
         m.startswith((
             "APX-", "XTS-", "XTL-", "XPR-", "XIR-P-", "XIR-M-",
             "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-",
-            "DGM-", "DEM-"
+            "DGM-", "DEM-", "SLR-"
         ))
         or m in {"R2", "R5", "R7", "R7EX", "DGP", "DGM", "DEM", "SLR", "DM1XXX"}
         for m in models
@@ -13344,6 +13346,58 @@ def user_is_first_observed_interaction(message: Message) -> bool:
     return str(row["first_seen"] or "") == str(row["last_seen"] or "")
 
 
+def message_has_request_or_technical_continuation(text_value: str) -> bool:
+    """True si el saludo forma parte de una consulta/solicitud real.
+
+    Evita interpretar como despedida mensajes del tipo:
+    "Colegas buenas noches, ¿alguien me puede ayudar con un SLR5100...?"
+
+    La detección es conservadora: exige una señal técnica estructurada o
+    una frase clara de solicitud/pregunta. Un simple "buenas noches colegas"
+    sigue siendo tratado por la lógica social normal.
+    """
+    if not text_value:
+        return False
+
+    normalized = normalize_intent(text_value).strip()
+
+    try:
+        parsed = technical_query_interpret(text_value)
+        if any(
+            parsed.get(key)
+            for key in (
+                "models",
+                "raw_model_anchors",
+                "brands",
+                "technologies",
+                "resources",
+                "equipment_classes",
+            )
+        ):
+            return True
+    except Exception:
+        # La clasificación social nunca debe caer por un fallo del parser técnico.
+        pass
+
+    if technical_archive_terms(text_value):
+        return True
+
+    request_patterns = (
+        r"\b(?:alguien|alguno|alguna|quien|quienes)\b.{0,45}\b"
+        r"(?:ayud|sabe|conoce|tiene|tenga|trabaja|trabaje|usa|utiliza|configur|conect)\w*\b",
+        r"\b(?:me|nos)\s+(?:puede|pueden|podria|podrian)\s+"
+        r"(?:ayudar|orientar|decir|indicar|explicar|confirmar)\b",
+        r"\b(?:necesito|necesitamos|busco|buscamos)\s+(?:ayuda|informacion|datos|orientacion)\b",
+        r"\b(?:tengo|tenemos)\s+(?:una\s+)?(?:consulta|pregunta|duda|problema)\b",
+        r"\b(?:por\s*favor|porfavor)\b.{0,35}\b(?:ayud|consulta|pregunta|duda)\w*\b",
+    )
+
+    return any(
+        re.search(pattern, normalized)
+        for pattern in request_patterns
+    )
+
+
 async def handle_collective_farewell(message: Message) -> bool:
     """
     Responde despedidas naturales dirigidas al grupo aunque Pecos no sea
@@ -13365,8 +13419,10 @@ async def handle_collective_farewell(message: Message) -> bool:
     if text_mentions_pecos(message.text):
         return False
 
-    # No cortar una consulta técnica que empieza o termina con una cortesía.
-    if technical_archive_terms(message.text):
+    # No cortar una consulta técnica o una solicitud de ayuda que empieza
+    # o termina con una cortesía. "Buenas noches" no significa despedida
+    # cuando el resto del mensaje continúa con una pregunta real.
+    if message_has_request_or_technical_continuation(message.text):
         return False
 
     words = normalized.split()
@@ -13478,9 +13534,19 @@ async def handle_collective_greeting(message: Message) -> bool:
             r"\s+(?:gente|amigos|grupo|colegas|companeros|muchachos|chicos|senores|caballeros)\b",
             normalized,
         ))
+        or bool(re.search(
+            r"\b(?:gente|amigos|grupo|colegas|companeros|muchachos|chicos|senores|caballeros)"
+            r"\s+(?:hola|saludos|buenas(?:\s+noches|\s+tardes)?|buenos\s+dias|buen\s+dia)\b",
+            normalized,
+        ))
     )
 
     if not (greeting_signal and collective_signal):
+        return False
+
+    # Si después del saludo viene una consulta real, la prioridad es técnica.
+    # No enviamos un saludo social que pueda interrumpir o confundir el hilo.
+    if message_has_request_or_technical_continuation(message.text):
         return False
 
     usuario = display_name(message)
