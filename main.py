@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.48-pecos-first-help-gate"
+VERSION = "2.8.49-mag-one-exact-search"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -291,7 +291,7 @@ ARCHIVE_SEARCH_MAX_RESULTS = 6
 ARCHIVE_AUTO_COOLDOWN_SECONDS = 600
 ARCHIVE_DETECTIVE_SIMILARITY = 0.72
 RECENT_ARCHIVE_HINTS: dict[tuple[int, str], float] = {}
-TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.3-autonomous-memory"
+TECHNICAL_CATALOG_PARSER_VERSION = "technical-v6.4-mag-one-models"
 
 ARCHIVE_SEARCH_STOPWORDS = {
     "pecos", "bot", "peco", "paul", "kele", "busca", "buscar", "buscame", "buscame",
@@ -320,6 +320,7 @@ TECHNICAL_ARCHIVE_WORDS = {
 ARCHIVE_FAMILY_ALIASES: dict[str, set[str]] = {
     "mototrbo": {"mototrbo", "motortrbo", "motorbo", "mototurbo", "motrbo"},
     "apx": {"apx"},
+    "magone": {"mag one", "magone", "mag-one"},
     "astro25": {"astro25", "astro 25", "astro-25"},
     "tetra": {"tetra"},
     "nxdn": {"nxdn"},
@@ -4719,6 +4720,7 @@ def technical_catalog_detect_brands(file_name: str) -> list[str]:
     if (
         re.search(r"\bMOTOROLA\b", spaced)
         or "MOTOTRBO" in compact
+        or "MAGONE" in compact
         or compact.startswith("APX")
         or re.search(
             r"\b(?:XTS|XTL|XPR|DEP|DGP|DP|EM|EP|GM|GP|PRO)\s*\d+",
@@ -4943,6 +4945,8 @@ def technical_catalog_detect_technologies(file_name: str) -> list[str]:
         found.append("DMR")
     if "MOTOTRBO" in compact:
         found.append("MOTOTRBO")
+    if "MAGONE" in compact:
+        found.append("MAG_ONE")
     if "APX" in compact:
         found.append("APX")
     if (
@@ -5006,6 +5010,16 @@ def technical_catalog_detect_models(file_name: str) -> list[str]:
     for prefix, pattern in TECHNICAL_MODEL_RULES:
         for match in re.finditer(pattern, spaced):
             add(f"{prefix}-{match.group(1)}")
+
+    # Motorola Mag One usa modelos muy cortos (A8, D8, X10D, etc.).
+    # Se reconocen únicamente cuando el nombre del archivo contiene MAG ONE,
+    # para evitar que tokens cortos genéricos se conviertan en modelos falsos.
+    mag_one_match = re.search(
+        r"\bMAG\s+ONE\s+([A-Z]{1,3}\d{1,4}[A-Z]?)\b",
+        spaced,
+    )
+    if mag_one_match:
+        add(f"MAG-ONE-{mag_one_match.group(1)}")
 
     # Casos compactos legítimos: KPGD6, KPG166D.
     for match in re.finditer(
@@ -5350,6 +5364,14 @@ def technical_query_detect_models(query: str) -> list[str]:
             seen.add(value)
             result.append(value)
 
+    # Motorola Mag One: la familia permite modelos cortos como A8/X10D.
+    mag_one_match = re.search(
+        r"\bMAG[-_ ]*ONE[-_ ]*([A-Z]{1,3}\d{1,4}[A-Z]?)\b",
+        q,
+    )
+    if mag_one_match:
+        add(f"MAG-ONE-{mag_one_match.group(1)}")
+
     for match in re.finditer(r"\bKPG([A-Z]?\d+[A-Z]?)\b", q):
         add(f"KPG-{match.group(1)}")
 
@@ -5508,6 +5530,7 @@ def technical_query_interpret(query: str) -> dict[str, object]:
     })
     technologies = technical_query_detect_aliases(query, {
         "MOTOTRBO": ("MOTOTRBO", "MOTORTRBO", "MOTORBO", "MOTOTURBO", "MOTRBO"),
+        "MAG_ONE": ("MAG ONE", "MAGONE", "MAG-ONE"),
         "APX": ("APX",),
         "ASTRO": ("ASTRO", "XTS"),
         "DMR": ("DMR",),
@@ -5556,13 +5579,18 @@ def technical_query_interpret(query: str) -> dict[str, object]:
     })
 
     inferred_brand = None
-    if "MOTOTRBO" in technologies or "APX" in technologies or "ASTRO" in technologies:
+    if (
+        "MOTOTRBO" in technologies
+        or "MAG_ONE" in technologies
+        or "APX" in technologies
+        or "ASTRO" in technologies
+    ):
         inferred_brand = "MOTOROLA"
     elif any(
         m.startswith((
             "APX-", "XTS-", "XTL-", "XPR-", "XIR-P-", "XIR-M-",
             "DEP-", "DGP-", "DP-", "EM-", "EP-", "GM-", "GP-", "PRO-",
-            "DGM-", "DEM-", "SLR-"
+            "DGM-", "DEM-", "SLR-", "MAG-ONE-"
         ))
         or m in {"R2", "R5", "R7", "R7EX", "DGP", "DGM", "DEM", "SLR", "DM1XXX"}
         for m in models
