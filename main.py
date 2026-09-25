@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.49-mag-one-exact-search"
+VERSION = "2.8.50-animal-likes-sarcasm"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -581,6 +581,236 @@ PECOS_ATTENTIVE_MESSAGES = [
     "🌵 {usuario}, por aquí hasta un cactus moviéndose raro llama la atención de Pecos.",
     "😎 Correcto, {usuario}. Pecos está pendiente de todo... y de lo que parece que no importa también.",
 ]
+
+# Respuestas de Pecos cuando le preguntan si le gusta un animal.
+# Se activa solamente cuando Pecos/Peco/@Pecos_Paul_Kele_Bot aparece
+# al PRINCIPIO del mensaje, respetando PECOS_HELP_REQUIRE_NAME_FIRST.
+PECOS_ANIMAL_TERMS = {
+    "gato", "gatos", "gata", "gatas",
+    "perro", "perros", "perra", "perras",
+    "caballo", "caballos", "yegua", "yeguas",
+    "burro", "burros", "burra", "burras", "asno", "asnos",
+    "loro", "loros", "lora", "loras", "papagayo", "papagayos",
+    "conejo", "conejos", "coneja", "conejas",
+    "hamster", "hamsters", "cobayo", "cobayos", "cuy", "cuyes",
+    "raton", "ratones", "rata", "ratas",
+    "pez", "peces", "pescado", "pescados",
+    "tiburon", "tiburones", "delfin", "delfines",
+    "ballena", "ballenas", "orca", "orcas",
+    "tortuga", "tortugas",
+    "serpiente", "serpientes", "culebra", "culebras",
+    "lagarto", "lagartos", "lagartija", "lagartijas",
+    "cocodrilo", "cocodrilos", "caiman", "caimanes",
+    "rana", "ranas", "sapo", "sapos",
+    "leon", "leones", "leona", "leonas",
+    "tigre", "tigres", "pantera", "panteras",
+    "puma", "pumas", "jaguar", "jaguares",
+    "oso", "osos", "panda", "pandas",
+    "lobo", "lobos", "zorro", "zorros", "zorra", "zorras",
+    "elefante", "elefantes",
+    "jirafa", "jirafas",
+    "cebra", "cebras",
+    "rinoceronte", "rinocerontes",
+    "hipopotamo", "hipopotamos",
+    "mono", "monos", "monito", "monitos",
+    "gorila", "gorilas", "chimpance", "chimpances",
+    "orangutan", "orangutanes",
+    "cabrita", "cabritas", "cabra", "cabras", "chivo", "chivos",
+    "oveja", "ovejas", "carnero", "carneros",
+    "vaca", "vacas", "toro", "toros",
+    "cerdo", "cerdos", "chancho", "chanchos",
+    "gallina", "gallinas", "gallo", "gallos", "pollo", "pollos",
+    "pato", "patos", "pata", "patas",
+    "pavo", "pavos",
+    "paloma", "palomas",
+    "aguila", "aguilas", "halcon", "halcones",
+    "buho", "buhos", "lechuza", "lechuzas",
+    "pinguino", "pinguinos",
+    "avestruz", "avestruces",
+    "canario", "canarios",
+    "mariposa", "mariposas",
+    "abeja", "abejas",
+    "hormiga", "hormigas",
+    "arana", "aranas",
+    "escarabajo", "escarabajos",
+    "grillo", "grillos",
+    "saltamontes", "libelula", "libelulas",
+    "pulpo", "pulpos", "calamar", "calamares",
+    "cangrejo", "cangrejos", "langosta", "langostas",
+    "estrella de mar", "estrellas de mar",
+    "caracol", "caracoles",
+    "foca", "focas", "morsa", "morsas",
+    "nutria", "nutrias", "castor", "castores",
+    "mapache", "mapaches",
+    "capibara", "capibaras", "carpincho", "carpinchos",
+    "ornitorrinco", "ornitorrincos",
+    "koala", "koalas",
+    "canguro", "canguros",
+    "axolote", "axolotes", "ajolote", "ajolotes",
+    "iguana", "iguanas",
+    "camaleon", "camaleones",
+    "erizo", "erizos",
+    "ardilla", "ardillas",
+    "murcielago", "murcielagos",
+}
+
+PECOS_ANIMAL_FRIENDLY_OPENERS = [
+    "😄 Sí, {usuario}. Si hablamos {animal_preposition}, claro que {like_verb}.",
+    "🤠 Claro que sí, {usuario}. Si el tema es {animal_subject}, {like_verb} sin problema.",
+    "🐾 Sí, partner {usuario}. {animal_subject_cap} también entra en la lista de animales que le caen bien a Pecos.",
+    "😎 Por supuesto, {usuario}. Si hablamos {animal_preposition}, Pecos dice que sí: {like_verb}.",
+]
+
+PECOS_ANIMAL_SARCASTIC_TAILS = [
+    " Y los burros también me caen bien… por acá aparecen algunos sin que Pecos tenga que buscarlos. 😏",
+    " También simpatizo con los loros; en el grupo siempre aparece alguno que repite la misma frecuencia hasta que uno se la aprende de memoria. 🦜😂",
+    " Las cabras igual tienen su encanto… algunas del grupo se suben al cerro solitas y después preguntan cómo bajar. 🐐😆",
+    " Y los pavos tampoco me molestan; digamos que este grupo mantiene la biodiversidad bastante bien representada. 🦃😂",
+    " Los burros también son nobles animales… y por suerte acá Pecos tiene material de observación casi todos los días. 😎",
+    " También me gustan los loros. Sobre todo porque, comparados con algunos del grupo, por lo menos ellos avisan que van a repetir lo mismo. 🦜😏",
+]
+
+
+def extract_pecos_animal_like_question(text_value: str):
+    """Extrae el animal de preguntas tipo 'Pecos, ¿te gustan los gatos?'."""
+    if not text_value or not pecos_help_invocation_allowed(text_value):
+        return None
+
+    raw = text_value.strip()
+
+    # Quitar el vocativo inicial de Pecos conservando el texto original
+    # para responder con el nombre del animal tal como lo escribió el usuario.
+    raw = re.sub(
+        r"^\s*(?:@?Pecos_Paul_Kele_Bot|Pecos|Peco)"
+        r"(?![A-Za-z0-9_])[\s,:;.!¡!¿?\-–—]*",
+        "",
+        raw,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    patterns = (
+        (
+            re.compile(
+                r"\bte\s+gustan\s+"
+                r"(?P<subject>(?:(?:los|las)\s+)?"
+                r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][^?!.;,]{0,45})",
+                re.IGNORECASE,
+            ),
+            True,
+        ),
+        (
+            re.compile(
+                r"\bte\s+gusta\s+"
+                r"(?P<subject>(?:(?:el|la|un|una)\s+)?"
+                r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][^?!.;,]{0,45})",
+                re.IGNORECASE,
+            ),
+            False,
+        ),
+        (
+            re.compile(
+                r"\bte\s+agradan\s+"
+                r"(?P<subject>(?:(?:los|las)\s+)?"
+                r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][^?!.;,]{0,45})",
+                re.IGNORECASE,
+            ),
+            True,
+        ),
+        (
+            re.compile(
+                r"\bte\s+agrada\s+"
+                r"(?P<subject>(?:(?:el|la|un|una)\s+)?"
+                r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][^?!.;,]{0,45})",
+                re.IGNORECASE,
+            ),
+            False,
+        ),
+    )
+
+    for pattern, plural in patterns:
+        match = pattern.search(raw)
+        if not match:
+            continue
+
+        subject = match.group("subject").strip()
+
+        # Quitar coletillas conversacionales que no forman parte del animal.
+        subject = re.split(
+            r"\s+\b(?:o\s+no|verdad|cierto|tambien|mucho|a\s+ti)\b",
+            subject,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" \t\r\n-–—")
+
+        if not subject:
+            continue
+
+        normalized_subject = normalize_intent(subject).lower().strip()
+        words = set(re.findall(r"[a-z0-9]+", normalized_subject))
+
+        # Verificación conservadora: debe aparecer un animal conocido.
+        # Evita que "Pecos, ¿te gustan las radios?" caiga en esta función.
+        if not any(
+            term in normalized_subject
+            for term in PECOS_ANIMAL_TERMS
+        ) and not any(
+            word in PECOS_ANIMAL_TERMS
+            for word in words
+        ):
+            continue
+
+        # Forma natural para "si hablamos de..."
+        lowered = subject.lower()
+        if lowered.startswith("el "):
+            animal_preposition = "del " + subject[3:].strip()
+        else:
+            animal_preposition = "de " + subject
+
+        return {
+            "subject": subject,
+            "animal_preposition": animal_preposition,
+            "plural": plural,
+        }
+
+    return None
+
+
+async def handle_pecos_animal_likes(message: Message) -> bool:
+    if not message.text:
+        return False
+
+    parsed = extract_pecos_animal_like_question(message.text)
+    if not parsed:
+        return False
+
+    usuario = display_name(message)
+    subject = parsed["subject"]
+    plural = bool(parsed["plural"])
+    like_verb = "me gustan" if plural else "me gusta"
+
+    opener = choose_random(
+        "pecos_animal_friendly",
+        PECOS_ANIMAL_FRIENDLY_OPENERS,
+        usuario,
+    )
+    opener = (
+        opener
+        .replace("{animal_preposition}", parsed["animal_preposition"])
+        .replace("{animal_subject}", subject)
+        .replace("{animal_subject_cap}", subject[:1].upper() + subject[1:])
+        .replace("{like_verb}", like_verb)
+    )
+
+    tail = choose_random(
+        "pecos_animal_sarcasm",
+        PECOS_ANIMAL_SARCASTIC_TAILS,
+        usuario,
+    )
+
+    await message.reply_text(opener + tail)
+    return True
+
 
 PECOS_OPINION_MESSAGES = [
     "🤔 Pecos opina que antes de disparar hay que mirar bien el blanco... pero algo de razón debe haber por ahí.",
@@ -13126,6 +13356,12 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
     # La fuente temporal es el timestamp del propio mensaje de Telegram,
     # convertido a la zona configurada de Pecos (America/Santiago).
     if await handle_pecos_time_date(message):
+        return True
+
+    # Preguntas amistosas sobre animales:
+    # "Pecos, ¿te gustan los gatos/perros/etc.?"
+    # Siempre responde positivamente y remata con humor sarcástico del grupo.
+    if await handle_pecos_animal_likes(message):
         return True
 
     # Broma específica solicitada por el administrador.
