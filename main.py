@@ -90,7 +90,7 @@ except Exception as _telethon_exc:
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.56-current-member-roster"
+VERSION = "2.8.57-expel-and-purge-user-roster"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -1529,6 +1529,18 @@ class Database:
                 ON current_group_members(chat_id);
 
 
+            CREATE TABLE IF NOT EXISTS retired_group_users (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                retired_at TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(chat_id, user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_retired_group_users_chat
+                ON retired_group_users(chat_id);
+
+
             CREATE TABLE IF NOT EXISTS reputation_notices (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -2720,6 +2732,95 @@ class Database:
                 """,
                 (int(chat_id),),
             ).fetchall()
+
+    def get_retired_user_ids(self, chat_id: int) -> set[int]:
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT user_id
+                FROM retired_group_users
+                WHERE chat_id = ? AND user_id > 0
+                """,
+                (int(chat_id),),
+            ).fetchall()
+        return {int(row["user_id"]) for row in rows if int(row["user_id"] or 0) > 0}
+
+    def restore_rejoined_users(
+        self,
+        chat_id: int,
+        current_user_ids: set[int],
+    ) -> int:
+        """Si un usuario depurado vuelve a ingresar, deja de estar retirado."""
+        ids = sorted({int(uid) for uid in current_user_ids if int(uid) > 0})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.lock:
+            cur = self.conn.execute(
+                f"""
+                DELETE FROM retired_group_users
+                WHERE chat_id = ?
+                  AND user_id IN ({placeholders})
+                """,
+                (int(chat_id), *ids),
+            )
+            self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def retire_user_profiles(
+        self,
+        chat_id: int,
+        user_ids: set[int],
+        *,
+        reason: str,
+    ) -> int:
+        """Quita usuarios del padrón estadístico, SIN borrar mensajes históricos.
+
+        Se borra su fila de user_profiles/current_group_members y se deja un
+        marcador mínimo por User ID en retired_group_users para que sus mensajes
+        antiguos no los vuelvan a crear como usuarios estadísticos.
+        """
+        ids = sorted({int(uid) for uid in user_ids if int(uid) > 0})
+        if not ids:
+            return 0
+
+        retired_at = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        rows = [
+            (int(chat_id), uid, retired_at, str(reason or "")[:120])
+            for uid in ids
+        ]
+        placeholders = ",".join("?" for _ in ids)
+
+        with self.lock:
+            self.conn.executemany(
+                """
+                INSERT INTO retired_group_users(chat_id, user_id, retired_at, reason)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                    retired_at = excluded.retired_at,
+                    reason = excluded.reason
+                """,
+                rows,
+            )
+            self.conn.execute(
+                f"""
+                DELETE FROM user_profiles
+                WHERE chat_id = ?
+                  AND user_id IN ({placeholders})
+                """,
+                (int(chat_id), *ids),
+            )
+            self.conn.execute(
+                f"""
+                DELETE FROM current_group_members
+                WHERE chat_id = ?
+                  AND user_id IN ({placeholders})
+                """,
+                (int(chat_id), *ids),
+            )
+            self.conn.commit()
+
+        return len(ids)
 
     def claim_reputation_notice(self, chat_id: int, user_id: int, milestone: int) -> bool:
         now = datetime.now(BOT_TZ).isoformat(timespec="seconds")
@@ -3974,9 +4075,11 @@ def human_activity_age(last_seen: datetime | None) -> str:
 
 def build_member_activity_snapshot(chat_id: int) -> list[dict[str, object]]:
     entries: dict[int, dict[str, object]] = {}
+    retired_ids = db.get_retired_user_ids(chat_id)
+
     for row in db.get_activity_message_stats(chat_id):
         user_id = int(row["user_id"] or 0)
-        if user_id <= 0:
+        if user_id <= 0 or user_id in retired_ids:
             continue
         entries[user_id] = {
             "user_id": user_id,
@@ -3989,7 +4092,7 @@ def build_member_activity_snapshot(chat_id: int) -> list[dict[str, object]]:
         }
     for row in db.get_activity_profiles(chat_id):
         user_id = int(row["user_id"] or 0)
-        if user_id <= 0:
+        if user_id <= 0 or user_id in retired_ids:
             continue
         profile_first = parse_activity_datetime(row["first_seen"])
         profile_last = parse_activity_datetime(row["last_seen"])
@@ -8958,6 +9061,13 @@ async def scan_current_group_members_mtproto(
         if int(getattr(user, "id", 0) or 0) > 0
     }
 
+    restored = db.restore_rejoined_users(chat_id, set(current_members))
+    if restored:
+        log.info(
+            "Padrón MTProto: %s usuario(s) depurado(s) reingresaron y fueron restaurados",
+            restored,
+        )
+
     snapshot = [
         mtproto_member_snapshot_row(user)
         for user in current_members.values()
@@ -9079,9 +9189,13 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
         "- La expulsión usa MTProto/Telethon kick_participant (ban + unban).",
         "- Pecos NO llama a deleteParticipantHistory ni a métodos de borrado.",
         "- Los mensajes históricos del usuario se conservan.",
-        "- El usuario expulsado puede volver a ingresar con un enlace válido.\n- Los candidatos que ya no están en el padrón actual no reducen el contador del grupo.",
+        "- El usuario expulsado puede volver a ingresar con un enlace válido.",
+        "- Los candidatos que ya no están en el padrón actual no reducen el contador del grupo.",
+        "- Al confirmar, los ya fuera del grupo se depuran del padrón estadístico de Pecos.",
+        "- Los expulsados correctamente también se depuran del padrón estadístico de Pecos.",
+        "- La depuración se hace por User ID, nunca por nombre ni @username.",
         "",
-        "ELEGIBLES:",
+        "ELEGIBLES PARA EXPULSAR:",
     ]
 
     if not eligible:
@@ -9096,6 +9210,18 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
                 f"Mensajes históricos registrados: {int(entry.get('message_count') or 0)}"
             )
 
+    lines += ["", "YA FUERA DEL GRUPO — SE DEPURARÁN DEL PADRÓN DE PECOS:"]
+    if not not_visible:
+        lines.append("(ninguno)")
+    else:
+        for index, entry in enumerate(not_visible, start=1):
+            lines.append(
+                f"{index}. {activity_person_label(entry)} | "
+                f"User ID: {int(entry.get('user_id') or 0)} | "
+                f"Última actividad: {format_activity_timestamp(entry.get('last_seen'))} | "
+                f"Mensajes históricos registrados: {int(entry.get('message_count') or 0)}"
+            )
+
     return "\n".join(lines)
 
 
@@ -9104,7 +9230,7 @@ def inactive_cleanup_confirmation_menu() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "⚠️ EXPULSAR ELEGIBLES",
+                    "⚠️ EXPULSAR + DEPURAR PADRÓN",
                     callback_data="cleanup:confirm",
                 )
             ],
@@ -9169,6 +9295,7 @@ async def send_inactive_cleanup_simulation(
 
     candidate_count = len(plan.get("candidates") or [])
     eligible_count = len(plan.get("eligible") or [])
+    already_out_count = len(plan.get("already_out") or [])
 
     with contextlib.suppress(TelegramError):
         await status.edit_text(
@@ -9183,8 +9310,10 @@ async def send_inactive_cleanup_simulation(
             f"Rango: {INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} → "
             f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}\n"
             f"Candidatos históricos: {candidate_count}\n"
-            f"Elegibles actuales para expulsión: {eligible_count}\n\n"
+            f"Elegibles actuales para expulsión: {eligible_count}\n"
+            f"Ya fuera del grupo para depurar del padrón: {already_out_count}\n\n"
             "✅ Mensajes históricos: SE CONSERVAN\n"
+            "🆔 Todo se identifica por User ID.\n"
             "⚠️ La confirmación vence en 10 minutos."
         ),
         reply_markup=inactive_cleanup_confirmation_menu(),
@@ -9216,6 +9345,7 @@ async def execute_inactive_cleanup(
         client = plan["client"]
         group_entity = plan["group_entity"]
         eligible = list(plan.get("eligible") or [])
+        already_out = list(plan.get("already_out") or [])
 
         expelled: list[tuple[dict[str, object], object]] = []
         skipped_admin: list[tuple[dict[str, object], object]] = []
@@ -9300,6 +9430,39 @@ async def execute_inactive_cleanup(
                 )
 
         # -----------------------------------------------------------------
+        # Depuración del padrón estadístico de Pecos
+        # -----------------------------------------------------------------
+        # 1) Usuarios que ya no estaban en el grupo.
+        # 2) Usuarios cuya expulsión terminó correctamente.
+        # NO se borran conversation_messages ni memoria técnica.
+        already_out_ids = {
+            int(entry.get("user_id") or 0)
+            for entry in already_out
+            if int(entry.get("user_id") or 0) > 0
+        }
+        expelled_ids = {
+            int(entry.get("user_id") or 0)
+            for entry, _user in expelled
+            if int(entry.get("user_id") or 0) > 0
+        }
+        purge_ids = already_out_ids | expelled_ids
+
+        purged_profiles = db.retire_user_profiles(
+            HISTORY_SOURCE_CHAT_ID,
+            purge_ids,
+            reason="limpieza_inactivos",
+        )
+
+        if purged_profiles:
+            db.add_history(
+                "LIMPIEZA INACTIVOS: PADRON DEPURADO "
+                f"usuarios={purged_profiles} "
+                f"ya_fuera={len(already_out_ids)} "
+                f"expulsados={len(expelled_ids)} "
+                "mensajes_historicos=CONSERVAR"
+            )
+
+        # -----------------------------------------------------------------
         # Registro privado detallado para el administrador
         # -----------------------------------------------------------------
         period_label = (
@@ -9316,10 +9479,13 @@ async def execute_inactive_cleanup(
             f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
             "",
             f"Total expulsados: {len(expelled)}",
+            f"Ya estaban fuera y fueron depurados del padrón: {len(already_out_ids)}",
+            f"Total de perfiles depurados del padrón de Pecos: {purged_profiles}",
             f"Omitidos por privilegios: {len(skipped_admin)}",
             f"Errores: {len(failed)}",
             "",
             "MENSAJES HISTÓRICOS: CONSERVADOS",
+            "MEMORIA TÉCNICA / ARCHIVOS / FINGERPRINTS: CONSERVADOS",
             "",
             "USUARIOS REALMENTE EXPULSADOS:",
         ]
@@ -9329,6 +9495,24 @@ async def execute_inactive_cleanup(
                 lines.extend(
                     [
                         f"{index}. {mtproto_user_display(user)}",
+                        f"   User ID: {int(entry.get('user_id') or 0)}",
+                        f"   Última actividad observada: "
+                        f"{format_activity_timestamp(entry.get('last_seen'))}",
+                        "",
+                    ]
+                )
+        else:
+            lines.append("(ninguno)")
+            lines.append("")
+
+        lines += [
+            "USUARIOS QUE YA ESTABAN FUERA Y FUERON DEPURADOS DEL PADRÓN:",
+        ]
+        if already_out:
+            for index, entry in enumerate(already_out, start=1):
+                lines.extend(
+                    [
+                        f"{index}. {activity_person_label(entry)}",
                         f"   User ID: {int(entry.get('user_id') or 0)}",
                         f"   Última actividad observada: "
                         f"{format_activity_timestamp(entry.get('last_seen'))}",
@@ -9366,6 +9550,8 @@ async def execute_inactive_cleanup(
             await progress.edit_text(
                 "✅ Limpieza terminada.\n\n"
                 f"Expulsados: {len(expelled)}\n"
+                f"Ya fuera y depurados del padrón: {len(already_out_ids)}\n"
+                f"Perfiles depurados de Pecos: {purged_profiles}\n"
                 f"Omitidos protegidos: {len(skipped_admin)}\n"
                 f"Errores: {len(failed)}\n\n"
                 "Mensajes históricos: SE CONSERVAN"
@@ -9379,6 +9565,8 @@ async def execute_inactive_cleanup(
             caption=(
                 "📄 Lista privada de usuarios realmente expulsados\n\n"
                 f"Expulsados: {len(expelled)}\n"
+                f"Ya fuera y depurados: {len(already_out_ids)}\n"
+                f"Perfiles depurados: {purged_profiles}\n"
                 f"Errores: {len(failed)}\n"
                 "✅ Mensajes históricos conservados."
             ),
