@@ -90,7 +90,7 @@ except Exception as _telethon_exc:
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.54-mtproto-bot-entity-fix"
+VERSION = "2.8.55-cleanup-public-summary-and-private-txt"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -9075,42 +9075,65 @@ async def execute_inactive_cleanup(
                     f"LIMPIEZA INACTIVOS: ERROR user_id={user_id} error={exc}"
                 )
 
+        # -----------------------------------------------------------------
+        # Registro privado detallado para el administrador
+        # -----------------------------------------------------------------
+        period_label = (
+            f"{INACTIVE_CLEANUP_START_DATE.year}"
+            f"–{INACTIVE_CLEANUP_END_DATE.year}"
+        )
+
         lines = [
-            "PECOS PAUL KELE - RESULTADO LIMPIEZA POR INACTIVIDAD",
+            "PECOS PAUL KELE - USUARIOS EXPULSADOS POR INACTIVIDAD",
             f"Grupo: {plan.get('group_title')}",
             f"Fecha: {datetime.now(BOT_TZ).strftime('%d/%m/%Y %H:%M')}",
-            f"Rango: {INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
+            f"Período evaluado: "
+            f"{INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
             f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
             "",
-            f"Elegibles revalidados: {len(eligible)}",
-            f"Expulsados: {len(expelled)}",
+            f"Total expulsados: {len(expelled)}",
             f"Omitidos por privilegios: {len(skipped_admin)}",
             f"Errores: {len(failed)}",
             "",
             "MENSAJES HISTÓRICOS: CONSERVADOS",
-            "Pecos no ejecutó deleteParticipantHistory ni métodos de borrado.",
             "",
-            "EXPULSADOS:",
+            "USUARIOS REALMENTE EXPULSADOS:",
         ]
 
-        for index, (entry, user) in enumerate(expelled, start=1):
-            lines.append(
-                f"{index}. {mtproto_user_display(user)} | "
-                f"ID {int(entry.get('user_id') or 0)} | "
-                f"última actividad {format_activity_timestamp(entry.get('last_seen'))}"
-            )
+        if expelled:
+            for index, (entry, user) in enumerate(expelled, start=1):
+                lines.extend(
+                    [
+                        f"{index}. {mtproto_user_display(user)}",
+                        f"   User ID: {int(entry.get('user_id') or 0)}",
+                        f"   Última actividad observada: "
+                        f"{format_activity_timestamp(entry.get('last_seen'))}",
+                        "",
+                    ]
+                )
+        else:
+            lines.append("(ninguno)")
+            lines.append("")
 
         if failed:
-            lines += ["", "ERRORES:"]
+            lines += [
+                "ERRORES / USUARIOS NO EXPULSADOS:",
+            ]
             for entry, user, error_text in failed:
-                lines.append(
-                    f"- {mtproto_user_display(user)} | "
-                    f"ID {int(entry.get('user_id') or 0)} | {error_text}"
+                lines.extend(
+                    [
+                        f"- {mtproto_user_display(user)}",
+                        f"  User ID: {int(entry.get('user_id') or 0)}",
+                        f"  Última actividad observada: "
+                        f"{format_activity_timestamp(entry.get('last_seen'))}",
+                        f"  Error: {error_text}",
+                        "",
+                    ]
                 )
 
         payload = io.BytesIO("\n".join(lines).encode("utf-8-sig"))
         payload.name = (
-            "pecos_resultado_limpieza_"
+            "pecos_usuarios_expulsados_"
             + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
             + ".txt"
         )
@@ -9124,16 +9147,53 @@ async def execute_inactive_cleanup(
                 "Mensajes históricos: SE CONSERVAN"
             )
 
+        # El TXT detallado se entrega SOLO al administrador que ejecutó
+        # la limpieza (chat privado).
         await context.bot.send_document(
             chat_id=chat_id,
             document=payload,
             caption=(
-                "🧹 Resultado de limpieza\n\n"
+                "📄 Lista privada de usuarios realmente expulsados\n\n"
                 f"Expulsados: {len(expelled)}\n"
                 f"Errores: {len(failed)}\n"
                 "✅ Mensajes históricos conservados."
             ),
         )
+
+        # -----------------------------------------------------------------
+        # Aviso público en el grupo principal
+        # -----------------------------------------------------------------
+        # Solo se publica si al menos una expulsión fue efectiva.
+        if expelled:
+            expelled_count = len(expelled)
+            noun = "usuario inactivo" if expelled_count == 1 else "usuarios inactivos"
+
+            public_text = (
+                "🧹 <b>Pecos hizo limpieza de la casa.</b>\n"
+                f"Se expulsaron <b>{expelled_count} {noun}</b> "
+                f"correspondientes al período <b>{period_label}</b>.\n"
+                "Los mensajes históricos permanecen en el grupo."
+            )
+
+            try:
+                await context.bot.send_message(
+                    chat_id=HISTORY_SOURCE_CHAT_ID,
+                    text=public_text,
+                    parse_mode="HTML",
+                )
+                db.add_history(
+                    "LIMPIEZA INACTIVOS: AVISO PUBLICO "
+                    f"expulsados={expelled_count} periodo={period_label}"
+                )
+            except TelegramError as exc:
+                log.warning(
+                    "Limpieza terminada pero no se pudo publicar aviso público: %s",
+                    exc,
+                )
+                db.add_history(
+                    "LIMPIEZA INACTIVOS: ERROR AVISO PUBLICO "
+                    f"expulsados={expelled_count} error={exc}"
+                )
 
 
 async def command_cleanup_inactive(
