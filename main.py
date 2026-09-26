@@ -7,6 +7,7 @@ Administración completa desde Telegram mediante botones.
 
 Requiere:
     python-telegram-bot==22.8
+    Telethon==1.45.0  # solo para expulsión MTProto conservando historial
 
 Variables de entorno:
     BOT_TOKEN              Token de @BotFather (obligatorio)
@@ -15,6 +16,8 @@ Variables de entorno:
     BOT_TIMEZONE           Ej. America/Santiago (opcional)
     DATA_DIR               Carpeta de datos (opcional, por defecto ./data)
     ALLOWED_GROUP_IDS      Grupos donde Pecos puede operar, separados por comas
+    TELEGRAM_API_ID        API ID de my.telegram.org para MTProto (opcional)
+    TELEGRAM_API_HASH      API Hash de my.telegram.org para MTProto (opcional)
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ import threading
 import time
 import unicodedata
 from urllib.parse import unquote, urlparse
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -69,9 +72,23 @@ from telegram.ext import (
     filters,
 )
 
+# Telethon es opcional para el resto de Pecos. Si falta, el bot inicia igual
+# y únicamente se desactiva la limpieza MTProto.
+try:
+    from telethon import TelegramClient
+    from telethon.errors import FloodWaitError, RPCError
+    TELETHON_AVAILABLE = True
+    TELETHON_IMPORT_ERROR = ""
+except Exception as _telethon_exc:
+    TelegramClient = None
+    FloodWaitError = Exception
+    RPCError = Exception
+    TELETHON_AVAILABLE = False
+    TELETHON_IMPORT_ERROR = str(_telethon_exc)
+
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.52-reactions-count-as-activity"
+VERSION = "2.8.53-inactive-mtproto-cleanup"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -236,6 +253,36 @@ DATA_DIR = Path(_data_dir_value).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "pecos.db"
 
+# ---------------------------------------------------------------------
+# Limpieza segura por inactividad histórica
+# ---------------------------------------------------------------------
+# Rango solicitado: desde 20/11/2022 hasta 01/01/2024, ambas fechas incluidas.
+INACTIVE_CLEANUP_START_DATE = date(2022, 11, 20)
+INACTIVE_CLEANUP_END_DATE = date(2024, 1, 1)
+INACTIVE_CLEANUP_CONFIRM_TTL_SECONDS = 10 * 60
+INACTIVE_CLEANUP_KICK_DELAY_SECONDS = 1.5
+
+_mtproto_api_id_raw = (
+    os.getenv("TELEGRAM_API_ID")
+    or os.getenv("API_ID")
+    or os.getenv("TELEGRAM_APP_ID")
+    or ""
+).strip()
+try:
+    TELEGRAM_API_ID = int(_mtproto_api_id_raw) if _mtproto_api_id_raw else 0
+except ValueError:
+    TELEGRAM_API_ID = 0
+
+TELEGRAM_API_HASH = (
+    os.getenv("TELEGRAM_API_HASH")
+    or os.getenv("API_HASH")
+    or os.getenv("TELEGRAM_APP_HASH")
+    or ""
+).strip()
+
+# Sesión MTProto del BOT, almacenada en el volumen persistente de Railway.
+MTPROTO_SESSION_BASENAME = str(DATA_DIR / "pecos_mtproto_bot")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -252,6 +299,14 @@ HASH_SEMAPHORE = asyncio.Semaphore(1)
 # Acciones de administración que están esperando texto del administrador.
 # No contienen datos sensibles y pueden perderse al reiniciar sin afectar config.
 PENDING_ADMIN_ACTION: dict[int, str] = {}
+
+# Confirmaciones de limpieza masiva por administrador.
+PENDING_INACTIVE_CLEANUP: dict[int, float] = {}
+
+# Cliente MTProto lazy: no se conecta hasta usar la limpieza.
+MTPROTO_CLIENT = None
+MTPROTO_CONNECT_LOCK = asyncio.Lock()
+INACTIVE_CLEANUP_LOCK = asyncio.Lock()
 
 # Contexto conversacional breve por chat.
 # Se usa para entender preguntas como "¿y este quién es?" justo después
@@ -8078,6 +8133,12 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("💤 Inactivos", callback_data="admin:inactive"),
             ],
             [
+                InlineKeyboardButton(
+                    "🧹 Limpieza 20/11/2022–01/01/2024",
+                    callback_data="admin:cleanup_inactive",
+                )
+            ],
+            [
                 InlineKeyboardButton("📦 Buscar archivos", callback_data="admin:search"),
                 InlineKeyboardButton("🧠 Memoria Pecos", callback_data="admin:memory"),
             ],
@@ -8550,6 +8611,523 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await respond(
             "No encontré ese recuerdo o no tienes permiso para borrarlo."
         )
+
+
+
+def inactive_cleanup_date_in_range(last_seen: object) -> bool:
+    if not isinstance(last_seen, datetime):
+        return False
+    local_dt = (
+        last_seen.astimezone(BOT_TZ)
+        if last_seen.tzinfo
+        else last_seen.replace(tzinfo=BOT_TZ)
+    )
+    observed_date = local_dt.date()
+    return INACTIVE_CLEANUP_START_DATE <= observed_date <= INACTIVE_CLEANUP_END_DATE
+
+
+def inactive_cleanup_historical_candidates() -> list[dict[str, object]]:
+    candidates = [
+        entry
+        for entry in build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
+        if inactive_cleanup_date_in_range(entry.get("last_seen"))
+    ]
+    candidates.sort(
+        key=lambda item: (
+            item.get("last_seen")
+            if isinstance(item.get("last_seen"), datetime)
+            else datetime.max.replace(tzinfo=BOT_TZ)
+        )
+    )
+    return candidates
+
+
+def mtproto_cleanup_configuration_error() -> str:
+    if not TELETHON_AVAILABLE:
+        return (
+            "Falta Telethon. Agrega «Telethon==1.45.0» a requirements.txt "
+            "y vuelve a desplegar."
+        )
+    if TELEGRAM_API_ID <= 0:
+        return "Falta TELEGRAM_API_ID en Railway."
+    if not TELEGRAM_API_HASH:
+        return "Falta TELEGRAM_API_HASH en Railway."
+    if not BOT_TOKEN:
+        return "Falta BOT_TOKEN."
+    return ""
+
+
+async def get_mtproto_client():
+    global MTPROTO_CLIENT
+
+    error = mtproto_cleanup_configuration_error()
+    if error:
+        raise RuntimeError(error)
+
+    async with MTPROTO_CONNECT_LOCK:
+        client = MTPROTO_CLIENT
+
+        if client is None:
+            client = TelegramClient(
+                MTPROTO_SESSION_BASENAME,
+                TELEGRAM_API_ID,
+                TELEGRAM_API_HASH,
+            )
+            MTPROTO_CLIENT = client
+
+        if not client.is_connected():
+            await client.connect()
+
+        if not await client.is_user_authorized():
+            await client.start(bot_token=BOT_TOKEN)
+
+        return client
+
+
+async def resolve_mtproto_group_entity(client, chat_id: int):
+    # Los diálogos del bot traen el access_hash correcto del supergrupo.
+    async for dialog in client.iter_dialogs():
+        if int(dialog.id) == int(chat_id):
+            return dialog.entity
+
+    return await client.get_entity(chat_id)
+
+
+def mtproto_user_display(user) -> str:
+    username = str(getattr(user, "username", "") or "").strip()
+    first_name = str(getattr(user, "first_name", "") or "").strip()
+    last_name = str(getattr(user, "last_name", "") or "").strip()
+    full = " ".join(part for part in (first_name, last_name) if part).strip()
+
+    if username and full:
+        return f"{full} (@{username})"
+    if username:
+        return f"@{username}"
+    if full:
+        return full
+    return f"ID {int(getattr(user, 'id', 0) or 0)}"
+
+
+def current_member_is_admin(user) -> bool:
+    participant = getattr(user, "participant", None)
+    participant_type = type(participant).__name__
+    return participant_type in {
+        "ChannelParticipantAdmin",
+        "ChannelParticipantCreator",
+        "ChatParticipantAdmin",
+        "ChatParticipantCreator",
+    }
+
+
+async def build_inactive_cleanup_plan() -> dict[str, object]:
+    """Construye el plan SIN expulsar a nadie."""
+    candidates = inactive_cleanup_historical_candidates()
+
+    client = await get_mtproto_client()
+    group_entity = await resolve_mtproto_group_entity(
+        client,
+        HISTORY_SOURCE_CHAT_ID,
+    )
+
+    me = await client.get_me()
+    my_permissions = await client.get_permissions(group_entity, me)
+
+    if not my_permissions or not my_permissions.is_admin:
+        raise RuntimeError("Pecos no figura como administrador MTProto del grupo.")
+    if not my_permissions.ban_users:
+        raise RuntimeError(
+            "Pecos no tiene permiso «Ban users / Bloquear usuarios»."
+        )
+
+    # Seguridad: solo se actúa sobre candidatos visibles como miembros actuales.
+    participants = await client.get_participants(group_entity, limit=None)
+    current_members = {
+        int(user.id): user
+        for user in participants
+        if int(getattr(user, "id", 0) or 0) > 0
+    }
+
+    protected_ids = set(ADMIN_USER_IDS) | set(OWNER_USER_IDS)
+    if int(getattr(me, "id", 0) or 0) > 0:
+        protected_ids.add(int(me.id))
+
+    eligible: list[tuple[dict[str, object], object]] = []
+    not_visible: list[dict[str, object]] = []
+    admins: list[dict[str, object]] = []
+    bots: list[dict[str, object]] = []
+    protected: list[dict[str, object]] = []
+
+    for entry in candidates:
+        user_id = int(entry.get("user_id") or 0)
+        if user_id <= 0:
+            continue
+
+        if user_id in protected_ids:
+            protected.append(entry)
+            continue
+
+        user = current_members.get(user_id)
+        if user is None:
+            # No afirmamos que abandonó: Telegram puede limitar listados.
+            not_visible.append(entry)
+            continue
+
+        if bool(getattr(user, "bot", False)):
+            bots.append(entry)
+            continue
+
+        if current_member_is_admin(user):
+            admins.append(entry)
+            continue
+
+        eligible.append((entry, user))
+
+    return {
+        "client": client,
+        "group_entity": group_entity,
+        "group_title": db.known_group_title(HISTORY_SOURCE_CHAT_ID),
+        "candidates": candidates,
+        "scanned_members": len(current_members),
+        "eligible": eligible,
+        "not_visible": not_visible,
+        "admins": admins,
+        "bots": bots,
+        "protected": protected,
+    }
+
+
+def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
+    group_title = str(plan.get("group_title") or HISTORY_SOURCE_CHAT_ID)
+    candidates = list(plan.get("candidates") or [])
+    eligible = list(plan.get("eligible") or [])
+    not_visible = list(plan.get("not_visible") or [])
+    admins = list(plan.get("admins") or [])
+    bots = list(plan.get("bots") or [])
+    protected = list(plan.get("protected") or [])
+
+    lines = [
+        "PECOS PAUL KELE - SIMULACIÓN DE LIMPIEZA POR INACTIVIDAD",
+        f"Grupo: {group_title}",
+        f"Generado: {datetime.now(BOT_TZ).strftime('%d/%m/%Y %H:%M')} ({TIMEZONE_NAME})",
+        "",
+        "RANGO INCLUSIVO:",
+        f"{INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
+        f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
+        "",
+        f"Candidatos históricos por fecha: {len(candidates)}",
+        f"Miembros visibles en escaneo MTProto: {int(plan.get('scanned_members') or 0)}",
+        f"Elegibles para expulsión: {len(eligible)}",
+        f"No visibles en escaneo actual: {len(not_visible)}",
+        f"Administradores/creador protegidos: {len(admins)}",
+        f"Bots excluidos: {len(bots)}",
+        f"IDs protegidos de Pecos/propietarios: {len(protected)}",
+        "",
+        "IMPORTANTE:",
+        "- ESTA SIMULACIÓN NO EXPULSA A NADIE.",
+        "- La expulsión usa MTProto/Telethon kick_participant (ban + unban).",
+        "- Pecos NO llama a deleteParticipantHistory ni a métodos de borrado.",
+        "- Los mensajes históricos del usuario se conservan.",
+        "- El usuario expulsado puede volver a ingresar con un enlace válido.",
+        "",
+        "ELEGIBLES:",
+    ]
+
+    if not eligible:
+        lines.append("(ninguno)")
+    else:
+        for index, item in enumerate(eligible, start=1):
+            entry, user = item
+            lines.append(
+                f"{index}. {mtproto_user_display(user)} | "
+                f"User ID: {int(entry.get('user_id') or 0)} | "
+                f"Última actividad: {format_activity_timestamp(entry.get('last_seen'))} | "
+                f"Mensajes históricos registrados: {int(entry.get('message_count') or 0)}"
+            )
+
+    return "\n".join(lines)
+
+
+def inactive_cleanup_confirmation_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⚠️ EXPULSAR ELEGIBLES",
+                    callback_data="cleanup:confirm",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Volver a simular",
+                    callback_data="cleanup:refresh",
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancelar",
+                    callback_data="cleanup:cancel",
+                ),
+            ],
+        ]
+    )
+
+
+async def send_inactive_cleanup_simulation(
+    chat_id: int,
+    admin_user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    error = mtproto_cleanup_configuration_error()
+    if error:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🧹 Limpieza por inactividad no disponible.\n\n"
+                f"{error}\n\n"
+                "El resto de Pecos continúa funcionando normalmente."
+            ),
+        )
+        return
+
+    status = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🔎 Pecos está construyendo la simulación.\n"
+            "No se expulsará a nadie en este paso."
+        ),
+    )
+
+    try:
+        plan = await build_inactive_cleanup_plan()
+    except Exception as exc:
+        log.exception("No se pudo simular limpieza por inactividad")
+        with contextlib.suppress(TelegramError):
+            await status.edit_text(f"❌ No pude construir la simulación:\n{exc}")
+        return
+
+    PENDING_INACTIVE_CLEANUP[admin_user_id] = (
+        time.monotonic() + INACTIVE_CLEANUP_CONFIRM_TTL_SECONDS
+    )
+
+    report = build_inactive_cleanup_plan_report(plan)
+    payload = io.BytesIO(report.encode("utf-8-sig"))
+    payload.name = (
+        "pecos_simulacion_limpieza_"
+        + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+        + ".txt"
+    )
+
+    candidate_count = len(plan.get("candidates") or [])
+    eligible_count = len(plan.get("eligible") or [])
+
+    with contextlib.suppress(TelegramError):
+        await status.edit_text(
+            "✅ Simulación terminada. Revisa el archivo antes de confirmar."
+        )
+
+    await context.bot.send_document(
+        chat_id=chat_id,
+        document=payload,
+        caption=(
+            "🧹 SIMULACIÓN — limpieza por inactividad\n\n"
+            f"Rango: {INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} → "
+            f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}\n"
+            f"Candidatos históricos: {candidate_count}\n"
+            f"Elegibles actuales para expulsión: {eligible_count}\n\n"
+            "✅ Mensajes históricos: SE CONSERVAN\n"
+            "⚠️ La confirmación vence en 10 minutos."
+        ),
+        reply_markup=inactive_cleanup_confirmation_menu(),
+    )
+
+
+async def execute_inactive_cleanup(
+    chat_id: int,
+    admin_user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    async with INACTIVE_CLEANUP_LOCK:
+        progress = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🧹 Pecos está revalidando el grupo antes de expulsar.\n"
+                "Los mensajes históricos NO serán eliminados."
+            ),
+        )
+
+        try:
+            plan = await build_inactive_cleanup_plan()
+        except Exception as exc:
+            log.exception("No se pudo revalidar limpieza por inactividad")
+            with contextlib.suppress(TelegramError):
+                await progress.edit_text(f"❌ No pude revalidar la limpieza:\n{exc}")
+            return
+
+        client = plan["client"]
+        group_entity = plan["group_entity"]
+        eligible = list(plan.get("eligible") or [])
+
+        expelled: list[tuple[dict[str, object], object]] = []
+        skipped_admin: list[tuple[dict[str, object], object]] = []
+        failed: list[tuple[dict[str, object], object, str]] = []
+
+        for position, item in enumerate(eligible, start=1):
+            entry, user = item
+            user_id = int(entry.get("user_id") or 0)
+
+            try:
+                # Revalidación individual antes de cada expulsión.
+                permissions = await client.get_permissions(group_entity, user)
+                if permissions and permissions.is_admin:
+                    skipped_admin.append((entry, user))
+                    db.add_history(
+                        f"LIMPIEZA INACTIVOS: omitido admin user_id={user_id}"
+                    )
+                    continue
+
+                if user_id in ADMIN_USER_IDS or user_id in OWNER_USER_IDS:
+                    skipped_admin.append((entry, user))
+                    continue
+
+                # kick_participant = ban + unban.
+                # NO se llama a deleteParticipantHistory ni a ningún método
+                # de borrado de mensajes.
+                await client.kick_participant(group_entity, user)
+                expelled.append((entry, user))
+
+                db.add_history(
+                    "LIMPIEZA INACTIVOS: EXPULSADO "
+                    f"user_id={user_id} "
+                    f"last_seen={format_activity_timestamp(entry.get('last_seen'))} "
+                    "historial_mensajes=CONSERVAR"
+                )
+
+                if position % 10 == 0:
+                    with contextlib.suppress(TelegramError):
+                        await progress.edit_text(
+                            "🧹 Limpieza en curso...\n"
+                            f"Procesados: {position}/{len(eligible)}\n"
+                            f"Expulsados: {len(expelled)}\n"
+                            f"Errores: {len(failed)}\n\n"
+                            "Mensajes históricos: SE CONSERVAN"
+                        )
+
+                await asyncio.sleep(INACTIVE_CLEANUP_KICK_DELAY_SECONDS)
+
+            except FloodWaitError as exc:
+                wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+
+                if 0 < wait_seconds <= 120:
+                    log.warning(
+                        "FloodWait %s s; reintento user_id=%s",
+                        wait_seconds,
+                        user_id,
+                    )
+                    await asyncio.sleep(wait_seconds + 1)
+                    try:
+                        permissions = await client.get_permissions(group_entity, user)
+                        if permissions and permissions.is_admin:
+                            skipped_admin.append((entry, user))
+                            continue
+                        await client.kick_participant(group_entity, user)
+                        expelled.append((entry, user))
+                        db.add_history(
+                            "LIMPIEZA INACTIVOS: EXPULSADO tras FloodWait "
+                            f"user_id={user_id} historial_mensajes=CONSERVAR"
+                        )
+                    except Exception as retry_exc:
+                        failed.append((entry, user, str(retry_exc)))
+                else:
+                    failed.append(
+                        (entry, user, f"FloodWait demasiado largo: {wait_seconds}s")
+                    )
+                    break
+
+            except Exception as exc:
+                failed.append((entry, user, str(exc)))
+                db.add_history(
+                    f"LIMPIEZA INACTIVOS: ERROR user_id={user_id} error={exc}"
+                )
+
+        lines = [
+            "PECOS PAUL KELE - RESULTADO LIMPIEZA POR INACTIVIDAD",
+            f"Grupo: {plan.get('group_title')}",
+            f"Fecha: {datetime.now(BOT_TZ).strftime('%d/%m/%Y %H:%M')}",
+            f"Rango: {INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
+            f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
+            "",
+            f"Elegibles revalidados: {len(eligible)}",
+            f"Expulsados: {len(expelled)}",
+            f"Omitidos por privilegios: {len(skipped_admin)}",
+            f"Errores: {len(failed)}",
+            "",
+            "MENSAJES HISTÓRICOS: CONSERVADOS",
+            "Pecos no ejecutó deleteParticipantHistory ni métodos de borrado.",
+            "",
+            "EXPULSADOS:",
+        ]
+
+        for index, (entry, user) in enumerate(expelled, start=1):
+            lines.append(
+                f"{index}. {mtproto_user_display(user)} | "
+                f"ID {int(entry.get('user_id') or 0)} | "
+                f"última actividad {format_activity_timestamp(entry.get('last_seen'))}"
+            )
+
+        if failed:
+            lines += ["", "ERRORES:"]
+            for entry, user, error_text in failed:
+                lines.append(
+                    f"- {mtproto_user_display(user)} | "
+                    f"ID {int(entry.get('user_id') or 0)} | {error_text}"
+                )
+
+        payload = io.BytesIO("\n".join(lines).encode("utf-8-sig"))
+        payload.name = (
+            "pecos_resultado_limpieza_"
+            + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+            + ".txt"
+        )
+
+        with contextlib.suppress(TelegramError):
+            await progress.edit_text(
+                "✅ Limpieza terminada.\n\n"
+                f"Expulsados: {len(expelled)}\n"
+                f"Omitidos protegidos: {len(skipped_admin)}\n"
+                f"Errores: {len(failed)}\n\n"
+                "Mensajes históricos: SE CONSERVAN"
+            )
+
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=payload,
+            caption=(
+                "🧹 Resultado de limpieza\n\n"
+                f"Expulsados: {len(expelled)}\n"
+                f"Errores: {len(failed)}\n"
+                "✅ Mensajes históricos conservados."
+            ),
+        )
+
+
+async def command_cleanup_inactive(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not message or not chat or not user:
+        return
+    if not is_admin(user.id):
+        return
+
+    if chat.type != ChatType.PRIVATE:
+        await message.reply_text(
+            "🔒 /limpieza_inactivos solo se ejecuta por chat privado con Pecos."
+        )
+        return
+
+    await send_inactive_cleanup_simulation(chat.id, user.id, context)
 
 
 async def command_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9246,6 +9824,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await safe_edit(query, "⚙️ Configuración de Pecos", main_menu())
         return
 
+    if data == "admin:cleanup_inactive":
+        PENDING_ADMIN_ACTION.pop(user_id, None)
+        await send_inactive_cleanup_simulation(chat.id, user_id, context)
+        return
+
+    if data == "cleanup:refresh":
+        await send_inactive_cleanup_simulation(chat.id, user_id, context)
+        return
+
+    if data == "cleanup:cancel":
+        PENDING_INACTIVE_CLEANUP.pop(user_id, None)
+        await query.message.reply_text(
+            "❌ Limpieza cancelada. No se expulsó a ningún usuario.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if data == "cleanup:confirm":
+        expires_at = float(PENDING_INACTIVE_CLEANUP.get(user_id, 0.0) or 0.0)
+        if expires_at <= time.monotonic():
+            PENDING_INACTIVE_CLEANUP.pop(user_id, None)
+            await query.message.reply_text(
+                "⌛ La confirmación venció. Ejecuta nuevamente la simulación."
+            )
+            return
+
+        PENDING_INACTIVE_CLEANUP.pop(user_id, None)
+        await execute_inactive_cleanup(chat.id, user_id, context)
+        return
+
     if data == "admin:activity":
         PENDING_ADMIN_ACTION.pop(user_id, None)
 
@@ -9415,6 +10023,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Tamaño DB: {db_size_text}\n"
             f"Grupos autorizados: {len(ALLOWED_GROUP_IDS)}\n"
             f"Administradores Pecos: {len(ADMIN_USER_IDS)}\n"
+            f"MTProto limpieza: {'✅ Configurado' if not mtproto_cleanup_configuration_error() else '⚠️ No disponible'}\n"
             f"Memoria histórica: ✅ Activa\n"
             f"Memoria técnica autónoma: {'✅ Activa' if autonomous_memory_enabled() else '❌ Desactivada'}\n"
             f"Q/A técnicos aprendidos: {auto_stats['qa_confirmed']:,}\n"
@@ -9440,6 +10049,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "/actividad — Resumen de actividad observada\n"
             "/actividad @usuario — Ficha de un usuario\n"
             "/inactivos 90 — Usuarios sin actividad durante 90 días\n"
+            "/limpieza_inactivos — Simular/confirmar expulsión histórica\n"
             "/recordar texto — Guardar un recuerdo del grupo\n"
             "/recuerdos — Ver recuerdos\n"
             "/olvidar ID — Borrar un recuerdo\n"
@@ -14569,6 +15179,7 @@ async def post_init(application: Application) -> None:
             BotCommand("start", "Abrir el menú de Pecos"),
             BotCommand("id", "Ver mi Telegram User ID"),
             BotCommand("config", "Abrir configuración privada"),
+            BotCommand("limpieza_inactivos", "Simular limpieza histórica"),
             BotCommand("cancel", "Cancelar una operación"),
         ]
 
@@ -14665,6 +15276,13 @@ async def post_shutdown(application: Application) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    global MTPROTO_CLIENT
+    if MTPROTO_CLIENT is not None:
+        with contextlib.suppress(Exception):
+            if MTPROTO_CLIENT.is_connected():
+                await MTPROTO_CLIENT.disconnect()
+        MTPROTO_CLIENT = None
+
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -14738,6 +15356,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("historial", command_history_search), group=0)
     app.add_handler(CommandHandler("actividad", command_activity), group=0)
     app.add_handler(CommandHandler("inactivos", command_inactive), group=0)
+    app.add_handler(CommandHandler("limpieza_inactivos", command_cleanup_inactive), group=0)
     app.add_handler(CommandHandler("consejo", command_advice), group=0)
     app.add_handler(CommandHandler("frase", command_phrase), group=0)
     app.add_handler(CommandHandler("excusa", command_excuse), group=0)
