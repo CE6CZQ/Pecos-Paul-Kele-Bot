@@ -90,7 +90,7 @@ except Exception as _telethon_exc:
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.55-cleanup-public-summary-and-private-txt"
+VERSION = "2.8.56-current-member-roster"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -258,9 +258,9 @@ DB_PATH = DATA_DIR / "pecos.db"
 # ---------------------------------------------------------------------
 # Limpieza segura por inactividad histórica
 # ---------------------------------------------------------------------
-# Rango solicitado: desde 20/11/2022 hasta 01/01/2024, ambas fechas incluidas.
+# Rango solicitado: desde 20/11/2022 hasta 27/12/2024, ambas fechas incluidas.
 INACTIVE_CLEANUP_START_DATE = date(2022, 11, 20)
-INACTIVE_CLEANUP_END_DATE = date(2024, 1, 1)
+INACTIVE_CLEANUP_END_DATE = date(2024, 12, 27)
 INACTIVE_CLEANUP_CONFIRM_TTL_SECONDS = 10 * 60
 INACTIVE_CLEANUP_KICK_DELAY_SECONDS = 1.5
 
@@ -1514,6 +1514,21 @@ class Database:
             );
 
 
+            CREATE TABLE IF NOT EXISTS current_group_members (
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                is_bot INTEGER NOT NULL DEFAULT 0,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_current_group_members_chat
+                ON current_group_members(chat_id);
+
+
             CREATE TABLE IF NOT EXISTS reputation_notices (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -2648,6 +2663,62 @@ class Database:
                 ORDER BY last_seen DESC
                 """,
                 (chat_id, cutoff_iso),
+            ).fetchall()
+
+    def replace_current_member_snapshot(
+        self,
+        chat_id: int,
+        members: list[dict[str, object]],
+    ) -> None:
+        """Reemplaza el padrón actual observado por MTProto.
+
+        Esta tabla es de membresía, no de actividad. Por diseño NO modifica
+        user_profiles.last_seen.
+        """
+        checked_at = datetime.now(BOT_TZ).isoformat(timespec="seconds")
+        rows = [
+            (
+                int(chat_id),
+                int(member.get("user_id") or 0),
+                str(member.get("username") or "")[:80],
+                str(member.get("display_name") or "")[:150],
+                1 if bool(member.get("is_bot")) else 0,
+                1 if bool(member.get("is_admin")) else 0,
+                checked_at,
+            )
+            for member in members
+            if int(member.get("user_id") or 0) > 0
+        ]
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM current_group_members WHERE chat_id = ?",
+                (int(chat_id),),
+            )
+            if rows:
+                self.conn.executemany(
+                    """
+                    INSERT INTO current_group_members(
+                        chat_id, user_id, username, display_name,
+                        is_bot, is_admin, checked_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self.conn.commit()
+
+    def get_current_member_snapshot(self, chat_id: int) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT
+                    user_id, username, display_name,
+                    is_bot, is_admin, checked_at
+                FROM current_group_members
+                WHERE chat_id = ? AND user_id > 0
+                ORDER BY user_id
+                """,
+                (int(chat_id),),
             ).fetchall()
 
     def claim_reputation_notice(self, chat_id: int, user_id: int, milestone: int) -> bool:
@@ -3947,6 +4018,79 @@ def build_member_activity_snapshot(chat_id: int) -> list[dict[str, object]]:
     return rows
 
 
+def member_activity_status(last_seen: datetime | None) -> tuple[str, str]:
+    if last_seen is None:
+        return "⚪", "SIN REGISTRO"
+    return activity_status(last_seen)
+
+
+def build_current_member_activity_snapshot(
+    chat_id: int,
+    current_members: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    """Cruza miembros actuales con actividad histórica sin inventar fechas."""
+    activity_by_id = {
+        int(entry.get("user_id") or 0): entry
+        for entry in build_member_activity_snapshot(chat_id)
+        if int(entry.get("user_id") or 0) > 0
+    }
+
+    if current_members is None:
+        current_members = [
+            {
+                "user_id": int(row["user_id"] or 0),
+                "username": str(row["username"] or "").lstrip("@"),
+                "display_name": str(row["display_name"] or "").strip(),
+                "is_bot": bool(row["is_bot"]),
+                "is_admin": bool(row["is_admin"]),
+            }
+            for row in db.get_current_member_snapshot(chat_id)
+        ]
+
+    merged: list[dict[str, object]] = []
+    for member in current_members:
+        user_id = int(member.get("user_id") or 0)
+        if user_id <= 0:
+            continue
+
+        activity = activity_by_id.get(user_id)
+        if activity is None:
+            merged.append(
+                {
+                    "user_id": user_id,
+                    "username": str(member.get("username") or "").lstrip("@"),
+                    "display_name": str(member.get("display_name") or "").strip(),
+                    "first_seen": None,
+                    "last_seen": None,
+                    "message_count": 0,
+                    "messages_30d": 0,
+                    "member_current": True,
+                    "is_bot": bool(member.get("is_bot")),
+                    "is_admin": bool(member.get("is_admin")),
+                }
+            )
+            continue
+
+        item = dict(activity)
+        if member.get("username"):
+            item["username"] = str(member.get("username") or "").lstrip("@")
+        if member.get("display_name"):
+            item["display_name"] = str(member.get("display_name") or "").strip()
+        item["member_current"] = True
+        item["is_bot"] = bool(member.get("is_bot"))
+        item["is_admin"] = bool(member.get("is_admin"))
+        merged.append(item)
+
+    def sort_key(item: dict[str, object]):
+        last_seen = item.get("last_seen")
+        if isinstance(last_seen, datetime):
+            return (1, last_seen)
+        return (0, datetime.min.replace(tzinfo=BOT_TZ))
+
+    merged.sort(key=sort_key, reverse=True)
+    return merged
+
+
 def activity_person_label(entry: dict[str, object]) -> str:
     username = str(entry.get("username") or "").strip()
     display = str(entry.get("display_name") or "").strip()
@@ -3985,33 +4129,75 @@ def find_activity_entries(entries: list[dict[str, object]], query: str) -> list[
 
 def build_activity_text_report(chat_title: str, entries: list[dict[str, object]], *, inactive_days: int | None = None) -> str:
     now_text = datetime.now(BOT_TZ).strftime("%d/%m/%Y %H:%M")
+    is_current_roster = bool(entries) and all(bool(e.get("member_current")) for e in entries)
+
     lines = [
         "PECOS PAUL KELE - REPORTE DE ACTIVIDAD OBSERVADA",
         f"Grupo: {chat_title}", f"Generado: {now_text} ({TIMEZONE_NAME})", "",
         "IMPORTANTE:",
         "Este informe NO representa la última conexión a Telegram.",
         "Solo indica la última actividad que Pecos observó/registró en el grupo.",
-        "Un usuario que solo lee y no escribe puede parecer inactivo.",
-        "El listado histórico tampoco confirma que la persona siga siendo miembro.", "",
-        "Clasificación:", "ACTIVO = 0 a 30 días", "POCO ACTIVO = 31 a 90 días",
-        "INACTIVO = 91 a 180 días", "MUY INACTIVO = más de 180 días", "",
     ]
+
+    if is_current_roster:
+        lines += [
+            "El listado fue cruzado con el padrón actual obtenido por MTProto.",
+            "SIN REGISTRO = miembro actual sin actividad atribuible observada por Pecos.",
+        ]
+    else:
+        lines += [
+            "Un usuario que solo lee y no escribe puede parecer inactivo.",
+            "El listado histórico no confirma por sí solo que siga siendo miembro.",
+        ]
+
+    lines += [
+        "",
+        "Clasificación:",
+        "ACTIVO = 0 a 30 días",
+        "POCO ACTIVO = 31 a 90 días",
+        "INACTIVO = 91 a 180 días",
+        "MUY INACTIVO = más de 180 días",
+        "SIN REGISTRO = miembro actual sin actividad observada",
+        "",
+    ]
+
     selected = entries
     if inactive_days is not None:
-        selected = [e for e in entries if activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"), datetime) else None) >= inactive_days]
-        selected.sort(key=lambda e: activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"), datetime) else None), reverse=True)
-        lines += [f"Filtro: sin actividad observada durante {inactive_days} días o más.", ""]
+        selected = [
+            e for e in entries
+            if isinstance(e.get("last_seen"), datetime)
+            and activity_age_days(e.get("last_seen")) >= inactive_days
+        ]
+        selected.sort(
+            key=lambda e: activity_age_days(e.get("last_seen")),
+            reverse=True,
+        )
+        lines += [
+            f"Filtro: {inactive_days} días o más sin actividad observada.",
+            "Los miembros SIN REGISTRO no se clasifican automáticamente como inactivos.",
+            "",
+        ]
+
     lines += [f"Usuarios incluidos: {len(selected)}", "=" * 78]
+
     for index, entry in enumerate(selected, 1):
         last_dt = entry.get("last_seen") if isinstance(entry.get("last_seen"), datetime) else None
-        icon, state = activity_status(last_dt)
+        icon, state = member_activity_status(last_dt)
+
+        if last_dt is None:
+            last_text = "SIN REGISTRO"
+        else:
+            last_text = f"{format_activity_timestamp(last_dt)} ({human_activity_age(last_dt)})"
+
         lines += [
             f"{index}. {icon} {state} | {activity_person_label(entry)}",
             f"   User ID: {int(entry.get('user_id') or 0)}",
-            f"   Última actividad observada: {format_activity_timestamp(last_dt)} ({human_activity_age(last_dt)})",
+            f"   Última actividad observada: {last_text}",
             f"   Mensajes registrados en memoria: {int(entry.get('message_count') or 0)}",
-            f"   Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}", "",
+            f"   Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}",
+            "",
         ]
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -8741,19 +8927,63 @@ def current_member_is_admin(user) -> bool:
     }
 
 
+def mtproto_member_snapshot_row(user) -> dict[str, object]:
+    username = str(getattr(user, "username", "") or "").strip().lstrip("@")
+    first_name = str(getattr(user, "first_name", "") or "").strip()
+    last_name = str(getattr(user, "last_name", "") or "").strip()
+    display_name = " ".join(
+        part for part in (first_name, last_name) if part
+    ).strip()
+
+    return {
+        "user_id": int(getattr(user, "id", 0) or 0),
+        "username": username,
+        "display_name": display_name,
+        "is_bot": bool(getattr(user, "bot", False)),
+        "is_admin": current_member_is_admin(user),
+    }
+
+
+async def scan_current_group_members_mtproto(
+    chat_id: int,
+) -> tuple[object, object, dict[int, object], list[dict[str, object]]]:
+    """Obtiene el padrón actual completo y lo persiste sin alterar actividad."""
+    client = await get_mtproto_client()
+    group_entity = await resolve_mtproto_group_entity(client, chat_id)
+    participants = await client.get_participants(group_entity, limit=None)
+
+    current_members = {
+        int(user.id): user
+        for user in participants
+        if int(getattr(user, "id", 0) or 0) > 0
+    }
+
+    snapshot = [
+        mtproto_member_snapshot_row(user)
+        for user in current_members.values()
+    ]
+    db.replace_current_member_snapshot(chat_id, snapshot)
+
+    log.info(
+        "Padrón MTProto actualizado | chat=%s | miembros=%s",
+        chat_id,
+        len(current_members),
+    )
+
+    return client, group_entity, current_members, snapshot
+
+
 async def build_inactive_cleanup_plan() -> dict[str, object]:
     """Construye el plan SIN expulsar a nadie."""
     candidates = inactive_cleanup_historical_candidates()
 
-    client = await get_mtproto_client()
     try:
-        group_entity = await resolve_mtproto_group_entity(
-            client,
-            HISTORY_SOURCE_CHAT_ID,
+        client, group_entity, current_members, _snapshot = (
+            await scan_current_group_members_mtproto(HISTORY_SOURCE_CHAT_ID)
         )
     except Exception as exc:
         raise RuntimeError(
-            "No pude resolver el supergrupo por MTProto sin GetDialogs. "
+            "No pude obtener el padrón actual del supergrupo por MTProto. "
             f"Detalle: {exc}"
         ) from exc
 
@@ -8767,20 +8997,12 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
             "Pecos no tiene permiso «Ban users / Bloquear usuarios»."
         )
 
-    # Seguridad: solo se actúa sobre candidatos visibles como miembros actuales.
-    participants = await client.get_participants(group_entity, limit=None)
-    current_members = {
-        int(user.id): user
-        for user in participants
-        if int(getattr(user, "id", 0) or 0) > 0
-    }
-
     protected_ids = set(ADMIN_USER_IDS) | set(OWNER_USER_IDS)
     if int(getattr(me, "id", 0) or 0) > 0:
         protected_ids.add(int(me.id))
 
     eligible: list[tuple[dict[str, object], object]] = []
-    not_visible: list[dict[str, object]] = []
+    already_out: list[dict[str, object]] = []
     admins: list[dict[str, object]] = []
     bots: list[dict[str, object]] = []
     protected: list[dict[str, object]] = []
@@ -8796,8 +9018,9 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
 
         user = current_members.get(user_id)
         if user is None:
-            # No afirmamos que abandonó: Telegram puede limitar listados.
-            not_visible.append(entry)
+            # El escaneo actual devolvió el padrón completo; este ID no forma
+            # parte del padrón actual observado.
+            already_out.append(entry)
             continue
 
         if bool(getattr(user, "bot", False)):
@@ -8817,7 +9040,8 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
         "candidates": candidates,
         "scanned_members": len(current_members),
         "eligible": eligible,
-        "not_visible": not_visible,
+        "not_visible": already_out,
+        "already_out": already_out,
         "admins": admins,
         "bots": bots,
         "protected": protected,
@@ -8845,7 +9069,7 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
         f"Candidatos históricos por fecha: {len(candidates)}",
         f"Miembros visibles en escaneo MTProto: {int(plan.get('scanned_members') or 0)}",
         f"Elegibles para expulsión: {len(eligible)}",
-        f"No visibles en escaneo actual: {len(not_visible)}",
+        f"Ya fuera del padrón actual: {len(not_visible)}",
         f"Administradores/creador protegidos: {len(admins)}",
         f"Bots excluidos: {len(bots)}",
         f"IDs protegidos de Pecos/propietarios: {len(protected)}",
@@ -8855,7 +9079,7 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
         "- La expulsión usa MTProto/Telethon kick_participant (ban + unban).",
         "- Pecos NO llama a deleteParticipantHistory ni a métodos de borrado.",
         "- Los mensajes históricos del usuario se conservan.",
-        "- El usuario expulsado puede volver a ingresar con un enlace válido.",
+        "- El usuario expulsado puede volver a ingresar con un enlace válido.\n- Los candidatos que ya no están en el padrón actual no reducen el contador del grupo.",
         "",
         "ELEGIBLES:",
     ]
@@ -9225,55 +9449,165 @@ async def command_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not user or not is_admin(user.id):
         if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
             await delete_group_command_invocation(message, context)
-            await context.bot.send_message(chat_id=chat.id, text="🔒 Esta función está disponible solo para administradores de Pecos.")
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="🔒 Esta función está disponible solo para administradores de Pecos.",
+            )
         return
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.reply_text("📊 /actividad se utiliza dentro de un grupo autorizado.")
         return
+
     await delete_group_command_invocation(message, context)
-    entries = build_member_activity_snapshot(chat.id)
+
+    roster_error = ""
+    current_snapshot: list[dict[str, object]] = []
+    try:
+        _client, _entity, _current_members, current_snapshot = (
+            await scan_current_group_members_mtproto(chat.id)
+        )
+    except Exception as exc:
+        roster_error = str(exc)
+        log.warning("No pude actualizar padrón MTProto para /actividad: %s", exc)
+
+    if current_snapshot:
+        entries = build_current_member_activity_snapshot(chat.id, current_snapshot)
+        current_count = len(entries)
+    else:
+        # Fallback de solo lectura si MTProto no está disponible.
+        entries = build_member_activity_snapshot(chat.id)
+        current_count = 0
+
     if not entries:
-        await context.bot.send_message(chat_id=chat.id, text="📊 Pecos todavía no tiene actividad observada para este grupo.")
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="📊 Pecos todavía no tiene datos de actividad para este grupo.",
+        )
         return
+
     query = " ".join(context.args).strip()
     if query:
         matches = find_activity_entries(entries, query)
         if not matches:
-            await context.bot.send_message(chat_id=chat.id, text=f"📊 No encontré actividad registrada para «{query}».")
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=f"📊 No encontré al usuario «{query}» en el padrón consultado.",
+            )
             return
         if len(matches) > 1:
-            sample = "\n".join(f"• {activity_person_label(e)} · ID {e['user_id']}" for e in matches[:8])
-            await context.bot.send_message(chat_id=chat.id, text=f"📊 Encontré varias coincidencias para «{query}»:\n{sample}\n\nUsa /actividad @usuario o /actividad USER_ID para precisar.")
+            sample = "\n".join(
+                f"• {activity_person_label(e)} · ID {e['user_id']}"
+                for e in matches[:8]
+            )
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    f"📊 Encontré varias coincidencias para «{query}»:\n"
+                    f"{sample}\n\n"
+                    "Usa /actividad @usuario o /actividad USER_ID para precisar."
+                ),
+            )
             return
+
         entry = matches[0]
-        last_seen = entry.get("last_seen") if isinstance(entry.get("last_seen"), datetime) else None
-        icon, state = activity_status(last_seen)
-        member_status = "no verificado"
-        try:
-            member = await context.bot.get_chat_member(chat_id=chat.id, user_id=int(entry["user_id"]))
-            member_status = telegram_member_status_label(str(member.status))
-        except TelegramError:
-            pass
-        await context.bot.send_message(chat_id=chat.id, text=(
-            f"📊 Actividad observada de {activity_person_label(entry)}\n\n"
-            f"{icon} Estado por actividad: {state}\n"
-            f"🕒 Última actividad observada: {format_activity_timestamp(last_seen)} ({human_activity_age(last_seen)})\n"
-            f"💬 Mensajes registrados: {int(entry.get('message_count') or 0)}\n"
-            f"📅 Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}\n"
-            f"👥 Estado actual consultado a Telegram: {member_status}\n"
-            f"🆔 User ID: {int(entry['user_id'])}\n\n"
-            "ℹ️ Esto no es la «última conexión» de Telegram; es la última actividad que Pecos pudo observar en el grupo. "
-            "Desde esta versión también cuentan las reacciones identificables (👍 ❤️ 😂, etc.)."
-        ))
+        last_seen = (
+            entry.get("last_seen")
+            if isinstance(entry.get("last_seen"), datetime)
+            else None
+        )
+        icon, state = member_activity_status(last_seen)
+
+        if last_seen is None:
+            activity_line = "SIN REGISTRO"
+        else:
+            activity_line = (
+                f"{format_activity_timestamp(last_seen)} "
+                f"({human_activity_age(last_seen)})"
+            )
+
+        member_status = "miembro actual (padrón MTProto)" if entry.get("member_current") else "no verificado"
+        if not current_snapshot:
+            try:
+                member = await context.bot.get_chat_member(
+                    chat_id=chat.id,
+                    user_id=int(entry["user_id"]),
+                )
+                member_status = telegram_member_status_label(str(member.status))
+            except TelegramError:
+                pass
+
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"📊 Actividad observada de {activity_person_label(entry)}\n\n"
+                f"{icon} Estado por actividad: {state}\n"
+                f"🕒 Última actividad observada: {activity_line}\n"
+                f"💬 Mensajes registrados: {int(entry.get('message_count') or 0)}\n"
+                f"📅 Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}\n"
+                f"👥 Estado actual: {member_status}\n"
+                f"🆔 User ID: {int(entry['user_id'])}\n\n"
+                "ℹ️ SIN REGISTRO significa que el usuario está en el grupo, "
+                "pero Pecos no tiene actividad atribuible observada para él."
+            ),
+        )
         return
-    buckets={"ACTIVO":0,"POCO ACTIVO":0,"INACTIVO":0,"MUY INACTIVO":0}
+
+    buckets = {
+        "ACTIVO": 0,
+        "POCO ACTIVO": 0,
+        "INACTIVO": 0,
+        "MUY INACTIVO": 0,
+        "SIN REGISTRO": 0,
+    }
     for entry in entries:
-        last_seen=entry.get("last_seen") if isinstance(entry.get("last_seen"),datetime) else None
-        _, state=activity_status(last_seen); buckets[state]+=1
-    report=build_activity_text_report(chat.title or str(chat.id), entries)
-    payload=io.BytesIO(report.encode("utf-8-sig")); payload.name="pecos_actividad_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
-    caption=(f"📊 Actividad observada por Pecos\n👥 Usuarios con registro: {len(entries)}\n🟢 Activos (0–30 d): {buckets['ACTIVO']}\n🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n📄 Adjunto va el detalle completo.\nℹ️ Mide actividad observada, no última conexión a Telegram. También cuentan reacciones identificables (👍 ❤️ 😂, etc.).")
-    await context.bot.send_document(chat_id=chat.id, document=payload, caption=caption)
+        last_seen = (
+            entry.get("last_seen")
+            if isinstance(entry.get("last_seen"), datetime)
+            else None
+        )
+        _, state = member_activity_status(last_seen)
+        buckets[state] += 1
+
+    observed_count = len(entries) - buckets["SIN REGISTRO"]
+
+    report = build_activity_text_report(chat.title or str(chat.id), entries)
+    payload = io.BytesIO(report.encode("utf-8-sig"))
+    payload.name = (
+        "pecos_actividad_"
+        + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+        + ".txt"
+    )
+
+    if current_count:
+        caption = (
+            "📊 Actividad observada por Pecos\n"
+            f"👥 Miembros actuales en Telegram: {current_count}\n"
+            f"📝 Miembros con actividad registrada: {observed_count}\n"
+            f"⚪ Miembros actuales sin actividad registrada: {buckets['SIN REGISTRO']}\n\n"
+            f"🟢 Activos (0–30 d): {buckets['ACTIVO']}\n"
+            f"🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n"
+            f"🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n"
+            f"🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n"
+            "📄 Adjunto va el detalle del padrón actual.\n"
+            "ℹ️ SIN REGISTRO no se considera automáticamente inactivo."
+        )
+    else:
+        caption = (
+            "📊 Actividad observada por Pecos\n"
+            f"📝 Usuarios con actividad registrada: {len(entries)}\n\n"
+            f"🟢 Activos (0–30 d): {buckets['ACTIVO']}\n"
+            f"🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n"
+            f"🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n"
+            f"🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n"
+            "⚠️ No pude actualizar el padrón actual por MTProto en esta consulta.\n"
+            f"Detalle: {roster_error[:180]}"
+        )
+
+    await context.bot.send_document(
+        chat_id=chat.id,
+        document=payload,
+        caption=caption,
+    )
 
 
 async def command_inactive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9283,26 +9617,97 @@ async def command_inactive(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not user or not is_admin(user.id):
         if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
             await delete_group_command_invocation(message, context)
-            await context.bot.send_message(chat_id=chat.id, text="🔒 Esta función está disponible solo para administradores de Pecos.")
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="🔒 Esta función está disponible solo para administradores de Pecos.",
+            )
         return
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.reply_text("📊 /inactivos se utiliza dentro de un grupo autorizado.")
         return
+
     await delete_group_command_invocation(message, context)
-    days=90
+
+    days = 90
     if context.args:
-        try: days=int(context.args[0])
+        try:
+            days = int(context.args[0])
         except ValueError:
-            await context.bot.send_message(chat_id=chat.id,text="Uso: /inactivos 90\nEl número corresponde a días sin actividad observada."); return
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="Uso: /inactivos 90\nEl número corresponde a días sin actividad observada.",
+            )
+            return
+
     if not 1 <= days <= 3650:
-        await context.bot.send_message(chat_id=chat.id,text="El rango permitido es entre 1 y 3650 días."); return
-    entries=build_member_activity_snapshot(chat.id)
-    inactive=[e for e in entries if activity_age_days(e.get("last_seen") if isinstance(e.get("last_seen"),datetime) else None)>=days]
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="El rango permitido es entre 1 y 3650 días.",
+        )
+        return
+
+    try:
+        _client, _entity, _current_members, current_snapshot = (
+            await scan_current_group_members_mtproto(chat.id)
+        )
+        entries = build_current_member_activity_snapshot(chat.id, current_snapshot)
+    except Exception as exc:
+        log.warning("No pude actualizar padrón MTProto para /inactivos: %s", exc)
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                "⚠️ No pude verificar el padrón actual del grupo por MTProto.\n"
+                "Por seguridad no generaré una lista de inactivos con datos históricos "
+                "que podrían incluir personas que ya salieron."
+            ),
+        )
+        return
+
+    inactive = [
+        e for e in entries
+        if isinstance(e.get("last_seen"), datetime)
+        and activity_age_days(e.get("last_seen")) >= days
+    ]
+    no_activity = sum(
+        1 for e in entries
+        if not isinstance(e.get("last_seen"), datetime)
+    )
+
     if not inactive:
-        await context.bot.send_message(chat_id=chat.id,text=f"📊 No encontré usuarios con {days} días o más sin actividad observada."); return
-    report=build_activity_text_report(chat.title or str(chat.id),entries,inactive_days=days)
-    payload=io.BytesIO(report.encode("utf-8-sig")); payload.name=f"pecos_inactivos_{days}d_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
-    await context.bot.send_document(chat_id=chat.id,document=payload,caption=(f"📊 Pecos encontró {len(inactive)} usuario(s) con {days} días o más sin actividad observada.\n\n📄 Adjunto va el detalle.\nℹ️ No significa que no entren a Telegram ni que sigan siendo miembros; solo que Pecos no ha observado actividad reciente de ellos en el grupo. Las reacciones identificables también cuentan como actividad."))
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"📊 No encontré miembros actuales con {days} días o más "
+                "sin actividad observada.\n"
+                f"⚪ Miembros actuales SIN REGISTRO de actividad: {no_activity}"
+            ),
+        )
+        return
+
+    report = build_activity_text_report(
+        chat.title or str(chat.id),
+        entries,
+        inactive_days=days,
+    )
+    payload = io.BytesIO(report.encode("utf-8-sig"))
+    payload.name = (
+        f"pecos_inactivos_{days}d_"
+        + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
+        + ".txt"
+    )
+
+    await context.bot.send_document(
+        chat_id=chat.id,
+        document=payload,
+        caption=(
+            f"📊 Miembros actuales con {days} días o más sin actividad observada: "
+            f"{len(inactive)}\n"
+            f"⚪ Miembros actuales SIN REGISTRO: {no_activity}\n\n"
+            "📄 Adjunto va el detalle.\n"
+            "ℹ️ Los SIN REGISTRO se muestran aparte y no se clasifican "
+            "automáticamente como inactivos."
+        ),
+    )
 
 
 async def command_search_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -9945,14 +10350,38 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "admin:activity":
         PENDING_ADMIN_ACTION.pop(user_id, None)
 
-        entries = build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
-        if not entries:
+        try:
+            _client, _entity, _members, snapshot = (
+                await scan_current_group_members_mtproto(HISTORY_SOURCE_CHAT_ID)
+            )
+            entries = build_current_member_activity_snapshot(
+                HISTORY_SOURCE_CHAT_ID,
+                snapshot,
+            )
+        except Exception as exc:
             await query.message.reply_text(
-                "👥 Pecos todavía no tiene actividad observada para el grupo fuente."
+                "⚠️ No pude actualizar el padrón actual por MTProto.\n"
+                f"Detalle: {str(exc)[:220]}"
             )
             return
 
-        buckets = admin_activity_summary(entries)
+        buckets = {
+            "ACTIVO": 0,
+            "POCO ACTIVO": 0,
+            "INACTIVO": 0,
+            "MUY INACTIVO": 0,
+            "SIN REGISTRO": 0,
+        }
+        for entry in entries:
+            last_seen = (
+                entry.get("last_seen")
+                if isinstance(entry.get("last_seen"), datetime)
+                else None
+            )
+            _, state = member_activity_status(last_seen)
+            buckets[state] += 1
+
+        observed_count = len(entries) - buckets["SIN REGISTRO"]
         group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
 
         report = build_activity_text_report(group_title, entries)
@@ -9965,13 +10394,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         caption = (
             f"👥 Actividad observada — {group_title}\n\n"
-            f"Usuarios con registro: {len(entries)}\n"
+            f"Miembros actuales en Telegram: {len(entries)}\n"
+            f"📝 Con actividad registrada: {observed_count}\n"
+            f"⚪ Sin actividad registrada: {buckets['SIN REGISTRO']}\n\n"
             f"🟢 Activos (0–30 d): {buckets['ACTIVO']}\n"
             f"🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n"
             f"🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n"
             f"🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n"
-            "📄 Adjunto va el detalle completo.\n"
-            "ℹ️ Es actividad observada en el grupo, no la última conexión a Telegram."
+            "📄 Adjunto va el detalle del padrón actual."
         )
 
         await context.bot.send_document(
@@ -10002,15 +10432,26 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("Período no permitido.")
             return
 
-        entries = build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
+        try:
+            _client, _entity, _members, snapshot = (
+                await scan_current_group_members_mtproto(HISTORY_SOURCE_CHAT_ID)
+            )
+            entries = build_current_member_activity_snapshot(
+                HISTORY_SOURCE_CHAT_ID,
+                snapshot,
+            )
+        except Exception as exc:
+            await query.message.reply_text(
+                "⚠️ No pude verificar el padrón actual por MTProto.\n"
+                f"Detalle: {str(exc)[:220]}"
+            )
+            return
+
         inactive = [
             entry
             for entry in entries
-            if activity_age_days(
-                entry.get("last_seen")
-                if isinstance(entry.get("last_seen"), datetime)
-                else None
-            ) >= days
+            if isinstance(entry.get("last_seen"), datetime)
+            and activity_age_days(entry.get("last_seen")) >= days
         ]
 
         group_title = db.known_group_title(HISTORY_SOURCE_CHAT_ID)
