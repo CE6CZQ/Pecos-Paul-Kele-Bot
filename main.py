@@ -64,13 +64,14 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    MessageReactionHandler,
     TypeHandler,
     filters,
 )
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.51-question-gate"
+VERSION = "2.8.52-reactions-count-as-activity"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -3625,6 +3626,44 @@ def remember_user_presence(message: Message) -> None:
         return
     username, shown = user_identity_tuple(user)
     db.touch_user_profile(message.chat_id, user.id, username, shown)
+
+
+async def remember_user_reaction_activity(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Actualiza last_seen cuando un usuario cambia una reacción en el grupo.
+
+    Telegram entrega las reacciones como un tipo de Update separado del
+    Message normal. Por eso no pasan por remember_user_presence(message).
+
+    - Cuenta reacciones identificables de usuarios humanos.
+    - También cuenta cambiar o retirar una reacción: sigue siendo actividad.
+    - Ignora reacciones anónimas/realizadas en nombre de un chat, porque no se
+      pueden atribuir de forma fiable a un User ID concreto.
+    - No responde nada en el grupo; solo actualiza user_profiles.last_seen.
+    """
+    reaction = update.message_reaction
+    if reaction is None:
+        return
+
+    chat = reaction.chat
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    if chat.id not in ALLOWED_GROUP_IDS:
+        return
+
+    user = reaction.user
+    if user is None or user.is_bot:
+        return
+
+    username, shown = user_identity_tuple(user)
+    db.touch_user_profile(
+        chat.id,
+        user.id,
+        username,
+        shown,
+    )
 
 
 def increment_user_metric(message: Message, counter_name: str, delta: int = 1) -> int:
@@ -8557,7 +8596,8 @@ async def command_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"📅 Mensajes registrados últimos 30 días: {int(entry.get('messages_30d') or 0)}\n"
             f"👥 Estado actual consultado a Telegram: {member_status}\n"
             f"🆔 User ID: {int(entry['user_id'])}\n\n"
-            "ℹ️ Esto no es la «última conexión» de Telegram; es la última actividad que Pecos pudo observar en el grupo."
+            "ℹ️ Esto no es la «última conexión» de Telegram; es la última actividad que Pecos pudo observar en el grupo. "
+            "Desde esta versión también cuentan las reacciones identificables (👍 ❤️ 😂, etc.)."
         ))
         return
     buckets={"ACTIVO":0,"POCO ACTIVO":0,"INACTIVO":0,"MUY INACTIVO":0}
@@ -8566,7 +8606,7 @@ async def command_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         _, state=activity_status(last_seen); buckets[state]+=1
     report=build_activity_text_report(chat.title or str(chat.id), entries)
     payload=io.BytesIO(report.encode("utf-8-sig")); payload.name="pecos_actividad_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
-    caption=(f"📊 Actividad observada por Pecos\n👥 Usuarios con registro: {len(entries)}\n🟢 Activos (0–30 d): {buckets['ACTIVO']}\n🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n📄 Adjunto va el detalle completo.\nℹ️ Mide actividad observada, no última conexión a Telegram.")
+    caption=(f"📊 Actividad observada por Pecos\n👥 Usuarios con registro: {len(entries)}\n🟢 Activos (0–30 d): {buckets['ACTIVO']}\n🟡 Poco activos (31–90 d): {buckets['POCO ACTIVO']}\n🟠 Inactivos (91–180 d): {buckets['INACTIVO']}\n🔴 Muy inactivos (>180 d): {buckets['MUY INACTIVO']}\n\n📄 Adjunto va el detalle completo.\nℹ️ Mide actividad observada, no última conexión a Telegram. También cuentan reacciones identificables (👍 ❤️ 😂, etc.).")
     await context.bot.send_document(chat_id=chat.id, document=payload, caption=caption)
 
 
@@ -8596,7 +8636,7 @@ async def command_inactive(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await context.bot.send_message(chat_id=chat.id,text=f"📊 No encontré usuarios con {days} días o más sin actividad observada."); return
     report=build_activity_text_report(chat.title or str(chat.id),entries,inactive_days=days)
     payload=io.BytesIO(report.encode("utf-8-sig")); payload.name=f"pecos_inactivos_{days}d_"+datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")+".txt"
-    await context.bot.send_document(chat_id=chat.id,document=payload,caption=(f"📊 Pecos encontró {len(inactive)} usuario(s) con {days} días o más sin actividad observada.\n\n📄 Adjunto va el detalle.\nℹ️ No significa que no entren a Telegram ni que sigan siendo miembros; solo que Pecos no ha observado actividad reciente de ellos en el grupo."))
+    await context.bot.send_document(chat_id=chat.id,document=payload,caption=(f"📊 Pecos encontró {len(inactive)} usuario(s) con {days} días o más sin actividad observada.\n\n📄 Adjunto va el detalle.\nℹ️ No significa que no entren a Telegram ni que sigan siendo miembros; solo que Pecos no ha observado actividad reciente de ellos en el grupo. Las reacciones identificables también cuentan como actividad."))
 
 
 async def command_search_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -14705,6 +14745,13 @@ def build_application() -> Application:
 
     # Botones.
     app.add_handler(CallbackQueryHandler(callback_router), group=0)
+
+    # Reacciones: también cuentan como actividad observada del usuario.
+    # No generan respuestas; únicamente actualizan user_profiles.last_seen.
+    app.add_handler(
+        MessageReactionHandler(remember_user_reaction_activity),
+        group=1,
+    )
 
     # Todo mensaje restante, incluidos captions y edited_message.
     app.add_handler(MessageHandler(filters.ALL, on_message), group=1)
