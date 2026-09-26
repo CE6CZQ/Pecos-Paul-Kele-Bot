@@ -75,12 +75,14 @@ from telegram.ext import (
 # Telethon es opcional para el resto de Pecos. Si falta, el bot inicia igual
 # y únicamente se desactiva la limpieza MTProto.
 try:
-    from telethon import TelegramClient
+    from telethon import TelegramClient, types, utils
     from telethon.errors import FloodWaitError, RPCError
     TELETHON_AVAILABLE = True
     TELETHON_IMPORT_ERROR = ""
 except Exception as _telethon_exc:
     TelegramClient = None
+    types = None
+    utils = None
     FloodWaitError = Exception
     RPCError = Exception
     TELETHON_AVAILABLE = False
@@ -88,7 +90,7 @@ except Exception as _telethon_exc:
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.53-inactive-mtproto-cleanup"
+VERSION = "2.8.54-mtproto-bot-entity-fix"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -8681,16 +8683,36 @@ async def get_mtproto_client():
         if not await client.is_user_authorized():
             await client.start(bot_token=BOT_TOKEN)
 
+        me = await client.get_me()
+        log.info(
+            "MTProto conectado | cuenta=@%s | bot=%s",
+            getattr(me, "username", "") or "",
+            bool(getattr(me, "bot", False)),
+        )
         return client
 
 
 async def resolve_mtproto_group_entity(client, chat_id: int):
-    # Los diálogos del bot traen el access_hash correcto del supergrupo.
-    async for dialog in client.iter_dialogs():
-        if int(dialog.id) == int(chat_id):
-            return dialog.entity
+    """Resuelve un supergrupo desde su Bot API chat_id sin usar GetDialogs.
 
-    return await client.get_entity(chat_id)
+    Telegram restringe messages.getDialogs para cuentas bot. Telethon, en
+    cambio, contempla el caso de bots y puede resolver un PeerChannel conocido
+    mediante channels.getChannels con access_hash=0 cuando el bot ya pertenece
+    al canal/supergrupo.
+    """
+    if types is None or utils is None:
+        raise RuntimeError("Telethon no está disponible.")
+
+    raw_id, peer_cls = utils.resolve_id(int(chat_id))
+    if peer_cls is not types.PeerChannel:
+        raise RuntimeError(
+            f"El chat {chat_id} no corresponde a un supergrupo/canal MTProto."
+        )
+
+    # get_input_entity(PeerChannel) usa la ruta especial de Telethon para bots:
+    # channels.GetChannelsRequest(InputChannel(channel_id, access_hash=0)).
+    # No llama a GetDialogsRequest.
+    return await client.get_input_entity(types.PeerChannel(raw_id))
 
 
 def mtproto_user_display(user) -> str:
@@ -8724,10 +8746,16 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
     candidates = inactive_cleanup_historical_candidates()
 
     client = await get_mtproto_client()
-    group_entity = await resolve_mtproto_group_entity(
-        client,
-        HISTORY_SOURCE_CHAT_ID,
-    )
+    try:
+        group_entity = await resolve_mtproto_group_entity(
+            client,
+            HISTORY_SOURCE_CHAT_ID,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "No pude resolver el supergrupo por MTProto sin GetDialogs. "
+            f"Detalle: {exc}"
+        ) from exc
 
     me = await client.get_me()
     my_permissions = await client.get_permissions(group_entity, me)
