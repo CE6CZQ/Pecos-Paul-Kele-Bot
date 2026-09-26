@@ -70,7 +70,7 @@ from telegram.ext import (
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.50-animal-likes-sarcasm"
+VERSION = "2.8.51-question-gate"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -3957,6 +3957,26 @@ def pecos_help_invocation_allowed(text_value: str) -> bool:
     if PECOS_HELP_REQUIRE_NAME_FIRST:
         return text_starts_with_pecos(text_value)
     return text_mentions_pecos(text_value)
+
+
+def pecos_conversational_question_allowed(text_value: str) -> bool:
+    """Regla para respuestas conversacionales de Pecos.
+
+    Requiere:
+    1) que Pecos/Peco/@Pecos_Paul_Kele_Bot esté al principio;
+    2) que el texto termine realmente en "?".
+
+    Las búsquedas/órdenes técnicas reconocidas se procesan por sus handlers
+    específicos antes de llegar a esta capa y no necesitan signo de pregunta.
+    """
+    raw = (text_value or "").strip()
+    if not raw:
+        return False
+
+    if not pecos_help_invocation_allowed(raw):
+        return False
+
+    return raw.endswith("?")
 
 
 def text_mentions_pecos(text_value: str) -> bool:
@@ -10615,6 +10635,9 @@ async def handle_identity(
     if not message.text:
         return False
 
+    if not pecos_conversational_question_allowed(message.text):
+        return False
+
     normalized = normalize_intent(message.text)
 
     # La pregunta debe estar realmente dirigida a Pecos.
@@ -13001,26 +13024,26 @@ async def handle_math_help(message: Message) -> bool:
 
     await message.reply_text(
         "🧮 Puedes preguntarme una cuenta directa por día, partner. Ejemplos:\n"
-        "• Pecos cuanto es 10*10-10\n"
-        "• Pecos cuanto es 10 por 10 menos 10\n"
-        "• Pecos suma 25 y 18\n"
-        "• Pecos multiplica 7 por 8\n"
-        "• Pecos divide 150 entre 3\n"
-        "• Pecos cual es el doble de 18\n"
-        "• Pecos cual es la mitad de 90\n"
-        "• Pecos 15 por ciento de 800\n"
-        "• Pecos raiz cuadrada de 144\n"
-        "• Pecos seno de 30 grados\n"
-        "• Pecos logaritmo base 2 de 8\n"
-        "• Pecos factorial de 8\n"
-        "• Pecos integral de e elevado a la x\n"
-        "• Pecos integral de 3x^2 + 2x - 5\n"
-        "• Pecos derivada de x^3 + 4x\n"
-        "• Pecos resuelve 2x + 5 = 17\n"
-        "• Pecos resuelve x^2 - 5x + 6 = 0\n"
-        "• Pecos sucesion aritmetica a3=11 y a8=31, calcula el termino general\n"
-        "• Pecos progresion aritmetica a5=17 y a12=45, calcula a20\n"
-        "• Pecos termino general a_n a partir de a_m y a_k, con m<k\n"
+        "• Pecos cuanto es 10*10-10?\n"
+        "• Pecos cuanto es 10 por 10 menos 10?\n"
+        "• Pecos suma 25 y 18?\n"
+        "• Pecos multiplica 7 por 8?\n"
+        "• Pecos divide 150 entre 3?\n"
+        "• Pecos cual es el doble de 18?\n"
+        "• Pecos cual es la mitad de 90?\n"
+        "• Pecos 15 por ciento de 800?\n"
+        "• Pecos raiz cuadrada de 144?\n"
+        "• Pecos seno de 30 grados?\n"
+        "• Pecos logaritmo base 2 de 8?\n"
+        "• Pecos factorial de 8?\n"
+        "• Pecos integral de e elevado a la x?\n"
+        "• Pecos integral de 3x^2 + 2x - 5?\n"
+        "• Pecos derivada de x^3 + 4x?\n"
+        "• Pecos resuelve 2x + 5 = 17?\n"
+        "• Pecos resuelve x^2 - 5x + 6 = 0?\n"
+        "• Pecos sucesion aritmetica a3=11 y a8=31, calcula el termino general?\n"
+        "• Pecos progresion aritmetica a5=17 y a12=45, calcula a20?\n"
+        "• Pecos termino general a_n a partir de a_m y a_k, con m<k?\n"
         "Si faltan valores en una sucesión aritmética, te los pediré y podrás responderlos en el siguiente mensaje.\n\n"
         "También puedes retarme con «Pecos reto matematico» para iniciar la guerra matemática. 🤠"
     )
@@ -13346,7 +13369,7 @@ async def handle_direct_pecos_mention(message: Message) -> bool:
 
     normalized = normalize_intent(message.text).strip()
 
-    if not pecos_help_invocation_allowed(message.text):
+    if not pecos_conversational_question_allowed(message.text):
         return False
 
     usuario = display_name(message)
@@ -13873,9 +13896,10 @@ async def handle_social(message: Message) -> bool:
     if not message.text:
         return False
 
-    normalized = normalize_intent(message.text)
-    if not text_mentions_pecos(message.text):
+    if not pecos_conversational_question_allowed(message.text):
         return False
+
+    normalized = normalize_intent(message.text)
 
     # Una petición técnica directa ("Pecos CPS MOTOTRBO?", etc.) pertenece
     # al buscador y no debe caer en una respuesta social genérica.
@@ -14259,17 +14283,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
     # Preguntas/respuestas y matemáticas: las consultas NUEVAS requieren
-    # "Pecos ..." al comienzo. Una sucesión ya pendiente conserva su
-    # respuesta de seguimiento sin obligar a repetir el nombre.
+    # "Pecos ..." al comienzo Y terminar en "?". Una sucesión ya pendiente
+    # conserva su respuesta de seguimiento sin obligar a repetir el nombre.
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        help_invoked_first = pecos_help_invocation_allowed(
+        conversational_question = pecos_conversational_question_allowed(
             message.text or message.caption or ""
         )
         pending_sequence_reply = (
             _arithmetic_sequence_pending_active(message) is not None
         )
 
-        if help_invoked_first:
+        if conversational_question:
             if await handle_custom_qa(message):
                 return
 
