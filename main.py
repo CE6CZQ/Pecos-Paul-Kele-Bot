@@ -90,7 +90,7 @@ except Exception as _telethon_exc:
 
 
 APP_NAME = "Pecos Paul Kele"
-VERSION = "2.8.57-expel-and-purge-user-roster"
+VERSION = "2.8.58-cleanup-block-786-1595"
 HISTORY_SOURCE_CHAT_ID = int(os.getenv("HISTORY_SOURCE_CHAT_ID", "-1001775566217"))
 HISTORY_MEMORY_GROUP_IDS = {
     int(x.strip()) for x in os.getenv("HISTORY_MEMORY_GROUP_IDS", "-1001775566217").split(",")
@@ -256,13 +256,837 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "pecos.db"
 
 # ---------------------------------------------------------------------
-# Limpieza segura por inactividad histórica
+# Limpieza segura: bloque explícito 786–1595 por User ID
 # ---------------------------------------------------------------------
 # Rango solicitado: desde 20/11/2022 hasta 27/12/2024, ambas fechas incluidas.
 INACTIVE_CLEANUP_START_DATE = date(2022, 11, 20)
 INACTIVE_CLEANUP_END_DATE = date(2024, 12, 27)
 INACTIVE_CLEANUP_CONFIRM_TTL_SECONDS = 10 * 60
 INACTIVE_CLEANUP_KICK_DELAY_SECONDS = 1.5
+
+# ---------------------------------------------------------------------
+# Limpieza masiva solicitada: bloque exacto 786–1595 del padrón actual.
+# Fuente: reporte /actividad entregado por el administrador.
+# IMPORTANTE: la selección es EXCLUSIVAMENTE por Telegram User ID.
+# Los nombres son solo informativos y jamás se usan para expulsar.
+# ---------------------------------------------------------------------
+CLEANUP_BLOCK_FIRST_INDEX = 786
+CLEANUP_BLOCK_LAST_INDEX = 1595
+CLEANUP_BLOCK_EXPECTED_COUNT = 810
+CLEANUP_BLOCK_TARGET_SHA256 = '52c832448c0f09138826983a5771278f1a9f9db8dddbffb9497a580a4af2df04'
+CLEANUP_BLOCK_TARGETS: tuple[tuple[int, int, str], ...] = (
+    (786, 1075072090, 'Daniel López CD3DLQ (@CD3DLQ)'),
+    (787, 354009112, 'Агент006 (@Kirilin)'),
+    (788, 1646291328, 'Memo Pinto'),
+    (789, 7286721969, 'Anderson Rodriguez'),
+    (790, 1306298041, 'benji ry brito'),
+    (791, 7030962393, 'Sjgs Lll'),
+    (792, 5785275523, '19466 (@avalosergio)'),
+    (793, 5101345814, 'Rodrigo (@rorro971)'),
+    (794, 335013840, 'Jose'),
+    (795, 8086514514, 'Luis Soto'),
+    (796, 1562718729, 'Sg Technology'),
+    (797, 913857272, 'CD2JEQ - Jepté'),
+    (798, 7743717687, 'RADIO&ACCESORIOS (@CE6SAD)'),
+    (799, 670609624, 'Cris Ighot (@ImzeocqzBp)'),
+    (800, 7366837656, '.'),
+    (801, 687277331, '\u206a\u206c\u206e\u206e\u206e\u206e \u206a\u206c\u206e\u206e\u206e\u206e'),
+    (802, 7579125759, 'Luis Enrique SanLo (@sanlo75)'),
+    (803, 834074645, 'Noel Rivera'),
+    (804, 2048410379, 'Na'),
+    (805, 25730194, 'Lucas (@lucasmatleb)'),
+    (806, 6203102990, 'Jonathan'),
+    (807, 6384487335, 'OA4'),
+    (808, 7101602572, 'Usuario 7101602572'),
+    (809, 186332258, 'Joaquin - EA5GVK (@quini7620)'),
+    (810, 7495894321, 'Lazy L'),
+    (811, 542410960, 'So (@ame81net)'),
+    (812, 7046252623, 'EA1CHG (@Ea1chg)'),
+    (813, 1702252672, 'YA'),
+    (814, 1116377696, 'CD5NSM Luis Luengo (@CD5NSM)'),
+    (815, 7291517229, '. (@Carlos011001)'),
+    (816, 123394713, 'Mike Lima (@MLaval)'),
+    (817, 6551919748, 'Juanpa Kiroz (@Caxorrito)'),
+    (818, 6230964447, 'Oscar_j Alvarez Quiros (@ojaq_79)'),
+    (819, 505972189, 't o n y (@Nokiafloyd)'),
+    (820, 1033877477, 'Rodrigo Vergara Lezana (@CE1PB)'),
+    (821, 1346643381, 'A (@zp71398xv)'),
+    (822, 940272843, 'VM (@VJMMJS)'),
+    (823, 1761083007, 'Roberto'),
+    (824, 5500240545, 'CTstarter'),
+    (825, 608860530, 'Bombero (@Lince14)'),
+    (826, 139048529, 'Ricardo Yáñez Aguilar'),
+    (827, 7068561381, 'V1P3R'),
+    (828, 153413234, 'mt1000 (@mtsxlab)'),
+    (829, 816564442, 'Diego CBM1CIA (@PcProService)'),
+    (830, 6819041419, 'DELTA LIMA'),
+    (831, 7450418780, 'Victor Victor'),
+    (832, 5097326213, 'Carlos M'),
+    (833, 1110041820, 'Pedro Flores'),
+    (834, 6587271706, 'Jaime Maldonado (@CD3JMA)'),
+    (835, 5864674981, 'Jhoshua'),
+    (836, 6996264832, 'WildFire (@WildFire715)'),
+    (837, 262751871, 'Muklas Wahyuda (@Muklaswahyuda)'),
+    (838, 6431574105, 'Jav'),
+    (839, 5563886210, 'JaVeRo'),
+    (840, 998729336, 'Cristián Eduardo (@Chichaneduardo)'),
+    (841, 1514792825, 'N2IY (@Rtl2021)'),
+    (842, 7047784349, 'Juan Carlos Espinoza Fuentes'),
+    (843, 5896986723, 'OSCAR'),
+    (844, 504952720, 'Luis Diaz VIP (@luisfeick)'),
+    (845, 1901480014, '😁'),
+    (846, 5272375136, 'Nono (@Nonobeta1)'),
+    (847, 489461492, 'Toni GZG (@EB7GZG)'),
+    (848, 5096446503, 'Luguillo'),
+    (849, 1458178419, 'José Silva (@Ce2Hja)'),
+    (850, 5505846951, 'Gerardo'),
+    (851, 727995115, 'Lukas (@LY1LB)'),
+    (852, 1257384061, 'Gabin - ubnt (@f4ubnt)'),
+    (853, 1540649360, 'Cybercom'),
+    (854, 1894404667, 'Darkar'),
+    (855, 5684772445, 'Darwin Quimi'),
+    (856, 6756227117, 'FeR RIVeRo (@Rivero501)'),
+    (857, 5614777624, 'Johnnie TI4JVC Villarreal (@TI4JVC)'),
+    (858, 1055433930, 'Juan Antonio'),
+    (859, 6979900853, 'Jorge Aranc Xq1lty'),
+    (860, 1715764056, 'Carlos Menendez (@Carlosmenendez123)'),
+    (861, 2027701481, 'S A'),
+    (862, 1141453542, 'carlos soto'),
+    (863, 5979846611, '. .'),
+    (864, 6577412060, 'OA4EAW'),
+    (865, 1714643753, 'Marco Ulloa CA3UGL'),
+    (866, 6757329103, 'Giancarlo Cruzado Alva'),
+    (867, 1589655225, 'JAIME MATIAS'),
+    (868, 1934992697, 'Soporte'),
+    (869, 2004084028, 'juan'),
+    (870, 1384854369, 'Andresfire3 Saez Ulloa'),
+    (871, 820643853, 'Yerko Guerra Kong (@Kekostream)'),
+    (872, 736400086, 'Alfa Mike'),
+    (873, 1073990236, 'Ricardo Jesus Clara Palomares'),
+    (874, 6259494618, 'Anthony'),
+    (875, 1623968923, 'Felipe Valenzuela'),
+    (876, 1261334177, 'Guillermo Garcia'),
+    (877, 5925400155, 'Anfredo'),
+    (878, 716413071, 'Vikri Sarracino'),
+    (879, 660898478, 'XE1IMB (@XE1IMB)'),
+    (880, 723001758, 'GAM'),
+    (881, 1426794658, 'Luis Fabrega'),
+    (882, 1912876176, 'Klauss (@Klaug223)'),
+    (883, 5401034831, 'Rafita'),
+    (884, 5422248298, 'MM'),
+    (885, 1158584718, 'Rood'),
+    (886, 404836397, 'J'),
+    (887, 5207745300, 'Jose Manuel'),
+    (888, 1168348848, 'Victor cortes'),
+    (889, 6052779788, 'Robert'),
+    (890, 5348925301, 'Ce3rdl'),
+    (891, 6195160426, 'Ernesto Daza'),
+    (892, 55557744, 'Cristian Donoso (@cadjdd)'),
+    (893, 1385366725, 'Jgc089 (@Jgc098)'),
+    (894, 250588372, 'Said Morales (@PeckeMorales)'),
+    (895, 1461148954, 'Luis Berrios'),
+    (896, 1413137219, 'Freddy Basaez Miranda'),
+    (897, 1966862584, 'W h ky (@wahuky)'),
+    (898, 1463876027, 'J A'),
+    (899, 1290196115, 'Reinaldo Reyes'),
+    (900, 5233641736, 'Luis Alfredo'),
+    (901, 579299725, 'Francisco Alvarado'),
+    (902, 1904423977, 'Guido Iván'),
+    (903, 8601601135, 'Raul Ibarra'),
+    (904, 8452845231, 'Radio'),
+    (905, 8568492088, 'Christian Araya'),
+    (906, 8512677220, 'José Zambrano'),
+    (907, 8126559223, 'Jose Miguel Bravo Diaz'),
+    (908, 8865463978, 'Rene García (@centracomhidalgo)'),
+    (909, 1589160347, 'Jhonny Vinces Rivadeneira'),
+    (910, 1557898165, 'Paul Huanca (@WPaulHP)'),
+    (911, 1308284014, 'Felix Antonio /CD2FRN'),
+    (912, 1970365219, 'Braulio Villa (@BraulioOne)'),
+    (913, 8454440961, 'mark (@cgc_mark_lbdv)'),
+    (914, 5008533028, 'Roial'),
+    (915, 7615688181, 'HY GAIN'),
+    (916, 1559307984, 'Cristian Peyran (@cristianpeyran)'),
+    (917, 2034837606, 'David H'),
+    (918, 1266092314, 'Jim'),
+    (919, 7013892238, 'jose a secas (@josra0324)'),
+    (920, 1509764921, 'Jose Luis Sanchez'),
+    (921, 8994432943, 'Grupo Alpha'),
+    (922, 8874448949, 'Omar Rodriguez'),
+    (923, 615096599, 'Alvamo (@Alvamo2024)'),
+    (924, 8105230445, 'Eduardo'),
+    (925, 2076500429, 'MG COMUNICACIONES'),
+    (926, 1159988052, 'Jorge Palmero 🇲🇽'),
+    (927, 8489817495, 'Carlos Gutz'),
+    (928, 1620007937, 'Tapia'),
+    (929, 1986683964, 'SysAdmin'),
+    (930, 800300782, 'RODRIGO POBLETE (@CE3PJD)'),
+    (931, 1572793424, 'Francisco'),
+    (932, 834672010, 'Carlos Herrera (@CarlosH3rr3ra)'),
+    (933, 867616896, 'João Sergio • PY1IP 🇧🇷 (@PY1IP)'),
+    (934, 5080830842, 'Adrian Alcaraz'),
+    (935, 1493178027, '. .'),
+    (936, 2008020699, 'Alejandro Monardes'),
+    (937, 8921861140, 'Eduardo Muñoz'),
+    (938, 5095711278, 'Sebita'),
+    (939, 1515454066, 'Heck Rey (@Heck_Rey)'),
+    (940, 8250667360, 'Cristian Ramirez (@Cristian_rac)'),
+    (941, 6133946262, 'Raúl'),
+    (942, 7079039444, 'Ichigo Meneses'),
+    (943, 6708176777, 'Perro Negro (@Perronegrooo)'),
+    (944, 6337436892, 'Gil Portillo'),
+    (945, 8941628147, 'Romeosierra X'),
+    (946, 8634188150, 'steysy g'),
+    (947, 5792350171, 'JESÚS TOLEDO (@Toledo58K1)'),
+    (948, 1683572941, 'JOshe (@JOsheLUis257)'),
+    (949, 6088905234, 'Luis M'),
+    (950, 8267342662, 'Fernando (Koyi) Avalos'),
+    (951, 8716097232, 'Moisés'),
+    (952, 8951772485, 'José Luis Salas'),
+    (953, 1494764132, 'Luis (@LAM1957)'),
+    (954, 5943446674, 'ALEXIS DIAZ'),
+    (955, 1583494332, 'Fernando Herrera (@Ferhertor)'),
+    (956, 1234549549, 'Andres'),
+    (957, 281238607, 'Alberto Barragan (@BARRAGANJF)'),
+    (958, 7789988094, 'Especialista MTSS Manzanillo'),
+    (959, 7071785420, 'Ivan'),
+    (960, 8979180911, 'Paramedico Guadalajara'),
+    (961, 5865024901, 'Ja Ar'),
+    (962, 862818896, 'A L (@Peshmerga02)'),
+    (963, 1586039356, '71357 71357'),
+    (964, 8814839653, 'Juan Co'),
+    (965, 5471824328, 'Matrix 2304'),
+    (966, 7495789286, '🇲🇽 Tirador deportivo'),
+    (967, 6865531040, '. .'),
+    (968, 1726324457, 'MZT SIN (@MZT_SIN)'),
+    (969, 6655939655, '16022'),
+    (970, 7178240755, 'John Muñoz'),
+    (971, 6081422412, 'Álvaro Jara'),
+    (972, 1157743561, 'Enri'),
+    (973, 1267030481, 'jonathan burgos (@tatan11B)'),
+    (974, 1999107431, 'Carlos'),
+    (975, 6102257388, 'Leo'),
+    (976, 8562577618, '.'),
+    (977, 1276545302, 'CE1 EIR (@EPIR23)'),
+    (978, 1058885070, 'Dairo Salazar'),
+    (979, 7307468981, 'Maverick'),
+    (980, 1590435455, 'alejandro CA2AKD (@CA2AKD)'),
+    (981, 8863283954, 'jhors'),
+    (982, 1153681712, 'Franco'),
+    (983, 8977575207, 'Daniel Alejandro Velasquez Millan'),
+    (984, 1341688130, 'I Santiago (@isaalge)'),
+    (985, 7867867655, 'CD3TBC'),
+    (986, 8700665607, 'Rony Dance'),
+    (987, 8547128021, 'ID 8547128021'),
+    (988, 8705338420, 'ZAVIEL'),
+    (989, 8279422020, '.........'),
+    (990, 5739748135, 'Paulo González'),
+    (991, 7593415981, 'Fernando Caiseo (@Joseretamals)'),
+    (992, 6562694874, 'Carlos'),
+    (993, 8840596362, 'Julio Lippmann'),
+    (994, 7583754655, 'da lex (@Dalex699)'),
+    (995, 8088671623, 'ID 8088671623'),
+    (996, 5114129211, 'Jose Luis Pardo F (@JoseLuisPardoFigueroa)'),
+    (997, 536164267, 'Esteban GT CD3EGX'),
+    (998, 7891199607, 'Veronika Benešová (@VeronikaBeneov)'),
+    (999, 8645279567, 'ID 8645279567'),
+    (1000, 6567539596, 'Juan'),
+    (1001, 8928961146, 'Mr Inge De Huetamo (@Mringedehuetamo)'),
+    (1002, 7351738580, 'MC🌴✨✨ (@mc90901)'),
+    (1003, 8430492235, 'Anderson San Tecnologia'),
+    (1004, 8599972373, 'Jp'),
+    (1005, 8909540944, 'Carlos ms'),
+    (1006, 1684973103, 'Fajro (@FajRodrigo)'),
+    (1007, 2034061281, 'Esteban'),
+    (1008, 8698933944, 'Jorge Sanchez'),
+    (1009, 8415229880, 'Carlos Llanten'),
+    (1010, 5526410694, 'فاهم'),
+    (1011, 8620729351, '.'),
+    (1012, 1704456289, 'Víctor Bórquez (@Victor331988)'),
+    (1013, 8980449910, 'MOTOTRBO Jose (@josemotorola)'),
+    (1014, 8546408413, 'ID 8546408413'),
+    (1015, 8279630236, 'Vadok'),
+    (1016, 8740489860, 'Emo Emo'),
+    (1017, 8644107378, 'Jjj'),
+    (1018, 5228309409, 'Miro -=MandM=-'),
+    (1019, 794661235, 'Christian Cruz (@i_am_christian_cruz)'),
+    (1020, 7146715667, 'Carlos'),
+    (1021, 1106703980, 'BC.'),
+    (1022, 1481139187, 'Jorge CD1JLH (@Jorge_hpm)'),
+    (1023, 6116056566, 'Marco Romero (@Mromero2976)'),
+    (1024, 633389690, 'ㅤЮра (@yuratron)'),
+    (1025, 8796604729, 'Markus (@Peil_sender)'),
+    (1026, 39418688, '宇軒 | BU2HB 神楽坂 (@russel053)'),
+    (1027, 6880489765, 'Инал Келехсаев'),
+    (1028, 89121009, 'Aleksey Mesilov (@Aleksey_Mesilov)'),
+    (1029, 1599049207, 'Dominik (@domo978)'),
+    (1030, 5328513984, 'Edgard Bizama (@Bizama88)'),
+    (1031, 5669106493, 'Nietzsche (@Nietzsche_162)'),
+    (1032, 755127186, 'Poe Kill'),
+    (1033, 7268454211, 'Antsfire'),
+    (1034, 7414176632, 'Erick'),
+    (1035, 8693023001, 'CPS Lab'),
+    (1036, 8302527357, 'QuezadaVHF +56994945687'),
+    (1037, 6826480721, 'Miguel Salinas'),
+    (1038, 7588981777, 'Israel Garza'),
+    (1039, 5705506779, 'Saya (@BudiHarta2007)'),
+    (1040, 389921689, 'Saul Diaz'),
+    (1041, 7020178230, 'Esteban Marcial'),
+    (1042, 1177670859, 'Alfredo'),
+    (1043, 8559313809, 'Jsm'),
+    (1044, 1691593618, 'Cesar Hernandez'),
+    (1045, 372646591, 'Евгений "R6DWG" (@R6DWG)'),
+    (1046, 5823588539, 'Giovanni Agudelo (@Giovaa12)'),
+    (1047, 845737895, 'Ali'),
+    (1048, 236060413, 'Charly (@Charly_Suas)'),
+    (1049, 705618627, 'Vicho (@Vichope0)'),
+    (1050, 6852014501, 'Luis Solis'),
+    (1051, 8780017712, 'Chchchchch'),
+    (1052, 1635571352, 'Cross Gero (@Crossb123)'),
+    (1053, 5537510863, 'Diego'),
+    (1054, 30790186, 'Ruben Santibañez CE6TTL (@ce6ttl)'),
+    (1055, 494986685, '.'),
+    (1056, 7355306187, 'Oscar Mayoral'),
+    (1057, 1501048524, '🧐'),
+    (1058, 8329119008, 'Geek Insane'),
+    (1059, 1784037691, '. (@George_119876)'),
+    (1060, 727779185, 'מקני (@ce3kra)'),
+    (1061, 7641074831, 'Alan Maciel'),
+    (1062, 1249814129, 'Jhonny CA6THA (@CA6THA)'),
+    (1063, 5116552981, 'maria Bbb'),
+    (1064, 8027044110, 'Juanjo'),
+    (1065, 7831639544, 'Ce1wml (@Ce1wml)'),
+    (1066, 8333385062, 'J O'),
+    (1067, 8015503718, 'Larissa'),
+    (1068, 6914123293, 'Punisher'),
+    (1069, 7697528052, '_scooter_ (@O_n_T_u_m_y_c)'),
+    (1070, 892306226, 'Marcus Imperiolli (@Emperino)'),
+    (1071, 8911964276, 'Miguel'),
+    (1072, 6407793884, 'Arturo Hernández'),
+    (1073, 1131415982, 'Angel (@mi6ilo)'),
+    (1074, 8521881361, 'antonio (@FireBoston)'),
+    (1075, 1217025483, 'Rc'),
+    (1076, 6340208620, 'I3yenj7w I2l3b8f (@cdrubsstwsb)'),
+    (1077, 7855330606, 'Juan Ramirez'),
+    (1078, 7591281386, 'Pato LeCuack (@pato_lecuack)'),
+    (1079, 8959001143, 'Nicolas Caipa'),
+    (1080, 7410705694, 'L (@Fazendd)'),
+    (1081, 5992889403, 'Rds Comunicaciones'),
+    (1082, 7024258334, 'Rodolfo'),
+    (1083, 1228527449, ':.: (@Chamelfo)'),
+    (1084, 839716716, 'carlos castillo arica (@carlosdearica)'),
+    (1085, 6974629342, 'Jorge Guerra'),
+    (1086, 2045261909, 'EA4AGU Jesús'),
+    (1087, 996683803, 'Leonel Ottone'),
+    (1088, 8424431715, 'Daniel Carvacho'),
+    (1089, 5230736365, 'Roberto Santibañez'),
+    (1090, 5520998167, 'KL 33'),
+    (1091, 8695390776, 'Alejandro Meza'),
+    (1092, 5850184004, 'Raul Riquelme Araya'),
+    (1093, 5631193879, 'Rodrigo Parra (@rparrap)'),
+    (1094, 1783358575, 'Jel Jhoa'),
+    (1095, 5649011716, 'Jonathan Felipe'),
+    (1096, 8714348678, 'Javier Andres'),
+    (1097, 7547325165, '90161'),
+    (1098, 849799327, 'Diego CX8BDR (@DiegoRubianes)'),
+    (1099, 7991677200, 'M'),
+    (1100, 882167772, 'Alejandro'),
+    (1101, 8686899442, 'jose'),
+    (1102, 6333823767, 'Roberto Luna Valladares'),
+    (1103, 5663096863, 'Kr Br'),
+    (1104, 7060938742, 'Juan Cid Salazar'),
+    (1105, 45327255, 'JMS 5UFR (@CEUFR)'),
+    (1106, 8656111139, 'José Luis Paredes'),
+    (1107, 8585971759, 'Mocsys Contacto'),
+    (1108, 805833097, 'Rodrigo Espinoza'),
+    (1109, 5664741201, 'EA4FCO'),
+    (1110, 1622980926, 'PanxoToro (@FrancoTx)'),
+    (1111, 8711221573, 'Ruben López Guadarrama'),
+    (1112, 5092973113, 'Steve CD1LKS'),
+    (1113, 6687585416, 'VG'),
+    (1114, 6209356386, 'Patricio Rubiño Aguila'),
+    (1115, 5087346528, 'Jorge Romero'),
+    (1116, 1542923357, 'Alexis'),
+    (1117, 6387674837, 'Master Chief'),
+    (1118, 138678747, 'Alabarce (@JoseAlabarce)'),
+    (1119, 8673522458, 'Juan Collao'),
+    (1120, 1710414240, 'Andruu (@Andruup)'),
+    (1121, 8252584450, '.'),
+    (1122, 5961715409, 'Alberto'),
+    (1123, 8643157923, 'Manuel Butrón'),
+    (1124, 7214467419, 'Bahometh_Dark'),
+    (1125, 1008769207, 'Ghost Dark Angel (@Ghoosth_Dark)'),
+    (1126, 407880646, 'Holyhazard'),
+    (1127, 753462590, 'Dondatos (@Dondatos)'),
+    (1128, 7767843066, 'Alvaro Patiño (@bobpatino26)'),
+    (1129, 8380674932, 'Mike'),
+    (1130, 8498146978, 'Juan Seve'),
+    (1131, 7075728362, 'Eko (@erkanzen)'),
+    (1132, 6785638068, 'Deniz'),
+    (1133, 1590622826, 'Bicicletas Y Refacciones Amador'),
+    (1134, 1094074213, 'Luigi (@swgps)'),
+    (1135, 8770040576, 'Tomas Gonzalez'),
+    (1136, 647690982, 'Gustavo Saavedra (@adolfoinostroza)'),
+    (1137, 11621596, 'Edinson (@z_edinson)'),
+    (1138, 7271331761, 'Rodrigo CA3GAX'),
+    (1139, 8539863919, 'Emprendimiento David lujano'),
+    (1140, 6819347342, 'JAMAL ASH SHINAR'),
+    (1141, 6699190950, 'Fabrizio ….'),
+    (1142, 6290116687, 'Willian Baldeon'),
+    (1143, 847208208, 'Alex Fernandes'),
+    (1144, 8562600544, 'ID 8562600544'),
+    (1145, 33148534, 'familia tux (@familiatux)'),
+    (1146, 6126606557, 'Zx083 (@mexicanouni)'),
+    (1147, 7775117149, 'Adrian Mainieri'),
+    (1148, 261077081, 'William Vargas (@willvcr)'),
+    (1149, 37447701, 'Antonio CL320 (@carras320)'),
+    (1150, 8566535400, '. .'),
+    (1151, 2859701, 'Lucho'),
+    (1152, 5885575190, 'Alex Villegas'),
+    (1153, 6963620029, 'Cristian Campos'),
+    (1154, 597685106, 'Rafael Ric (@EA7UW)'),
+    (1155, 1504018599, 'Omaba1991 (@OMABA1991)'),
+    (1156, 741116718, 'EA5ITB Javier Tormo'),
+    (1157, 8576210481, 'Danilo'),
+    (1158, 3717534, 'Ernesto Abreu (@eabreu112)'),
+    (1159, 6841834145, 'Fernando Bernal'),
+    (1160, 21724537, 'Juan Contreras Arellano'),
+    (1161, 1529436220, 'Jose Montes'),
+    (1162, 8372847707, 'Juan Mene'),
+    (1163, 1764098333, 'Juan leal'),
+    (1164, 5414073906, 'Jcarlos Osses'),
+    (1165, 8446508807, 'David'),
+    (1166, 1564740366, 'Martin Duran'),
+    (1167, 1299107523, 'MIGUEL'),
+    (1168, 557867908, 'Marco Molina'),
+    (1169, 157687391, 'Leonardo Soto'),
+    (1170, 1181464778, 'Freddy (@Krugger22)'),
+    (1171, 1545634044, 'CD2FNR FRANCISCO CASTILLO REYES (@CD2FNR)'),
+    (1172, 5565863240, 'Ryan'),
+    (1173, 1441665119, 'Matt Nelson (@scanSydney)'),
+    (1174, 8591722483, 'Tibas'),
+    (1175, 894513703, 'Malik Pandžić'),
+    (1176, 839948622, 'cesar corrales CE2MCG'),
+    (1177, 983853190, 'Cristian FL'),
+    (1178, 6214802184, 'daniel concha'),
+    (1179, 5682832805, 'Andy'),
+    (1180, 5088735076, 'Erwin Hernandez Catril'),
+    (1181, 8441270704, 'Pablo'),
+    (1182, 8301933861, 'Leo Fer'),
+    (1183, 2112800147, '-Deadlol-'),
+    (1184, 6463528331, 'Nicje'),
+    (1185, 1655885021, 'Juan Pablo Sánchez (@PaPOs1988)'),
+    (1186, 7989251505, 'Alon'),
+    (1187, 327065461, 'Master Of Disaster'),
+    (1188, 8584824188, 'Jose'),
+    (1189, 1460443389, 'Gastón CE4STG'),
+    (1190, 1722672975, 'Tomas Marin (@CE3MBT)'),
+    (1191, 20740921, 'Diego (@zl_diego)'),
+    (1192, 569827974, 'Victor V2M Maldonado (@TheV2M)'),
+    (1193, 6072760089, 'Jose Carvajal'),
+    (1194, 5327422609, 'M. D.'),
+    (1195, 8253906826, 'Tere (@Alibernalperez)'),
+    (1196, 7231767840, 'Ro'),
+    (1197, 7559208742, 'Nacho Ponce'),
+    (1198, 1755048212, 'DZHON'),
+    (1199, 7796756775, 'Jose lopez'),
+    (1200, 6629272743, 'Victor (@VictorJaraMino)'),
+    (1201, 5984346729, 'Franco Jara'),
+    (1202, 5811456567, 'dr.SK (@sk_doctor)'),
+    (1203, 1919156132, 'Elvis'),
+    (1204, 8299025818, 'Radcop'),
+    (1205, 1425022267, 'Esteban Tapia'),
+    (1206, 8529939583, 'Chavalo Lira'),
+    (1207, 760042761, 'Дмитрий (@Kaskad1)'),
+    (1208, 724824381, 'Емельян Сперанский (@YemelyanSperansky)'),
+    (1209, 288682393, '117 R9JBD Dmitry (@ArkKedr_Ugra)'),
+    (1210, 1300451998, 'Gilbert Eduardo Castillo Redondo'),
+    (1211, 6989759805, 'Juan Camacho (@None0954)'),
+    (1212, 8321361908, 'Luis Ovando'),
+    (1213, 5826020028, 'Pedro Landaeta'),
+    (1214, 3960753, 'Charly_ Stan (@CHG54)'),
+    (1215, 1798325975, '😀'),
+    (1216, 5084046528, 'mike (@mike_1488)'),
+    (1217, 635507044, 'Daniel Belmonte (@danny0324)'),
+    (1218, 5130186049, 'Ya'),
+    (1219, 84112993, 'AiD (@AiD911)'),
+    (1220, 1320140166, 'Ignacio (@Ignaciss)'),
+    (1221, 7747249318, 'ID 7747249318'),
+    (1222, 8423045988, 'Cb CD4 AQD (@estacionniebla)'),
+    (1223, 8084264752, 'Covadonga1'),
+    (1224, 6527120474, 'Emil'),
+    (1225, 8526360589, 'Renato'),
+    (1226, 6646085071, 'Angelo Escobar'),
+    (1227, 8352845751, 'Arturo'),
+    (1228, 8009669462, 'Gilberto Guzmán'),
+    (1229, 8521901689, 'Claudio Flores'),
+    (1230, 5184156125, 'John Zenteno'),
+    (1231, 842847663, 'Martin Jesus'),
+    (1232, 769964392, 'Ada'),
+    (1233, 1420281520, 'willow'),
+    (1234, 6286208423, 'Administration (@C7C70C700)'),
+    (1235, 8444845815, 'Mike (@PelicanKM)'),
+    (1236, 1053064496, 'mike (@strokedka)'),
+    (1237, 807056876, 'jose jose'),
+    (1238, 788096692, 'Henry G.'),
+    (1239, 8356652364, 'ID 8356652364'),
+    (1240, 8307251279, 'Ted'),
+    (1241, 600745702, 'Javier (@Radio_Engineering_EA3GXK)'),
+    (1242, 6365545290, 'Reizag'),
+    (1243, 1251319704, 'SAUL Diaz'),
+    (1244, 6492027452, 'Jorge Espinoza'),
+    (1245, 1801603449, 'Yo Jk (@R0n1c0)'),
+    (1246, 6320541255, 'Viljams'),
+    (1247, 8361727675, 'Ryt Quillota'),
+    (1248, 382521681, 'sasha555 (@sasha5_55)'),
+    (1249, 8466670035, 'Jj'),
+    (1250, 463267144, 'Sherif lviv (@Sherif_lviv)'),
+    (1251, 6137029556, 'Luis'),
+    (1252, 1451010581, 'Jaime (@jaimecortess)'),
+    (1253, 5450314961, 'Zainoel AR YD9UMQ 🇲🇨 (@YD9UMQ_Zainul)'),
+    (1254, 888803204, 'Henry May'),
+    (1255, 629884003, '123123 (@BG6TTT)'),
+    (1256, 5792028124, 'Andres Mendoza'),
+    (1257, 1512237772, 'Jm .'),
+    (1258, 5002999615, 'Cristian Inostroza torres (@cristan_926)'),
+    (1259, 722961529, 'Mago (@Ofticio)'),
+    (1260, 1072878985, 'Juanka TI2JCY'),
+    (1261, 1353907116, 'Diego (@dkosta)'),
+    (1262, 1457409410, 'Rodrigo Lucero CE8WDB (@ce8wdb)'),
+    (1263, 8209727461, 'Enmanuel Moraga'),
+    (1264, 7144895933, 'Dago (@MuffinEater69)'),
+    (1265, 1539214127, 'Jorge'),
+    (1266, 6118668088, 'Francisco Mena'),
+    (1267, 846831449, 'CA3MKF Mauricio 🇨🇱'),
+    (1268, 1319850150, 'Guty (@Luke_guty)'),
+    (1269, 426935441, 'Ricardo (@m4china13)'),
+    (1270, 229901458, 'Carlos Salas (@bomberosalas)'),
+    (1271, 5046493203, 'Vicho Luna (@VichoLuna)'),
+    (1272, 1096328991, 'Cristian Tello (@c_tello)'),
+    (1273, 1456398650, 'Cristian Becerra'),
+    (1274, 1267031267, 'Jose V.'),
+    (1275, 5177189462, 'Ciko 39'),
+    (1276, 1910277459, 'Carlos'),
+    (1277, 1299984144, 'osvaldo (@CA2RON)'),
+    (1278, 5401454770, 'PAMUNGKAS'),
+    (1279, 7437432599, 'Jorge Martinez (@Jorgematias_1986)'),
+    (1280, 1509511020, 'Jesús Omar Becerra Higuera'),
+    (1281, 2008066367, 'Joaquin (@joaquij)'),
+    (1282, 1125722740, '14FRS587 fabien'),
+    (1283, 7146811243, 'Al M (@sealphies)'),
+    (1284, 6382178101, 'Beni'),
+    (1285, 1851613332, 'José Luis Ravelo (@Jlravelo)'),
+    (1286, 6961348537, 'Ash'),
+    (1287, 7718654574, 'Josue Herverth'),
+    (1288, 7106512603, 'Felipe Lucero'),
+    (1289, 1362649978, 'Luis García'),
+    (1290, 6985993632, 'Carlos Alberto Montañez González (@CAMG73)'),
+    (1291, 1070110825, 'Hola! (@hola_hola_hola_cl)'),
+    (1292, 5873977108, 'ROBERD González'),
+    (1293, 1524827174, 'FELIX'),
+    (1294, 7004039224, 'Christian Orellana'),
+    (1295, 1998437523, 'Freddy Hidalgo Cuello (@FREDMASTER)'),
+    (1296, 5410484064, 'Raúl Sanchez'),
+    (1297, 7814958995, 'J D I Com Digital'),
+    (1298, 884020731, 'Pío Jesus López Rivera (@piolopezrivera)'),
+    (1299, 7196238506, 'José Danilo'),
+    (1300, 7330660495, 'Pulento Xl'),
+    (1301, 1288325501, 'Carlos Concha'),
+    (1302, 1834873887, 'TI5 OSG Soto. (@TI5OSG)'),
+    (1303, 8490618284, 'Antonino Ferreira'),
+    (1304, 5343607918, 'Victor Huerta'),
+    (1305, 6702014625, 'Hugo Beto (@Hugo_Beto)'),
+    (1306, 6853025613, 'A E'),
+    (1307, 5073888559, 'Praga Cancun'),
+    (1308, 7810241151, 'Cristian'),
+    (1309, 8336074595, 'Xavi'),
+    (1310, 6034122996, 'Johnny'),
+    (1311, 7334199579, 'Sebastián'),
+    (1312, 1182535034, 'Alfredo Olvera (@D_2_AOZ)'),
+    (1313, 8428334133, 'Diego78'),
+    (1314, 8019262919, 'Inga Muste (@YL3IM)'),
+    (1315, 6286008258, 'Soedjono Joan (@Navkom_and_electrizen)'),
+    (1316, 1757987363, 'sancho 12345'),
+    (1317, 8041332028, 'Jorge CD1VLI'),
+    (1318, 1113428665, 'TI3DAS JOSE DAVID (@TI3DAS)'),
+    (1319, 6241696601, 'Erick Martinez'),
+    (1320, 8132446145, 'Claudio'),
+    (1321, 8395630118, 'Julio Erwin Sanchez Guzman'),
+    (1322, 6914370508, 'Chuyin 9 1 1 (@Chuyin911)'),
+    (1323, 5958824119, 'Kiko Chavez'),
+    (1324, 463509762, 'cascha (@cascha42)'),
+    (1325, 988486652, 'Juan (@JCalzada)'),
+    (1326, 8213815902, 'Freddy Alvarado'),
+    (1327, 1267853286, 'Nando Cortes'),
+    (1328, 431077960, 'Javi (ea5hxt) (@EA5HXT)'),
+    (1329, 8394453130, 'David Albornoz'),
+    (1330, 8272223935, 'Rodrigo Prog (@CD3VID)'),
+    (1331, 6466889278, 'Alex (@loksa_by)'),
+    (1332, 7513982329, 'Olman Barbosa (@Olman_Barbosa)'),
+    (1333, 1401825524, 'Rudi (@YO6SAP)'),
+    (1334, 323494942, 'Csongi Bongi (@CsongiBongi)'),
+    (1335, 1564516025, 'Milton'),
+    (1336, 5035477957, 'Sheraliev Fariddun (@Fariddun_Motorola)'),
+    (1337, 6244619251, 'CPS Motorola'),
+    (1338, 7905000146, 'CK'),
+    (1339, 5339687940, 'Claudio'),
+    (1340, 2083409082, 'Carlos alejandro Uribe switt (@CE8CAU)'),
+    (1341, 7528554650, 'Sergio Berrios Rojas'),
+    (1342, 594485161, 'J0r9eA (@J0r9eA)'),
+    (1343, 7691677555, '. .'),
+    (1344, 6760316851, 'Miau'),
+    (1345, 7835557175, 'Juan Sepulveda'),
+    (1346, 2062753492, 'Rafael Vallejo'),
+    (1347, 5509303786, '@Pipo'),
+    (1348, 1663480455, 'Pablo Andres Ramírez Plaza'),
+    (1349, 8127552500, 'richard'),
+    (1350, 5076518132, 'Juan CA3GOZ'),
+    (1351, 1339385991, 'Victor (@worldspy557)'),
+    (1352, 1474583079, 'Vjatcheslav Galich'),
+    (1353, 811235435, 'scooter (@NNoommaaD)'),
+    (1354, 1525475273, 'ШарашМонтаж (@igorbarkov1978)'),
+    (1355, 5312357013, 'omar f'),
+    (1356, 8053980441, 'Jorge'),
+    (1357, 7851307304, 'Edgar Sánchez'),
+    (1358, 6438421262, 'JR'),
+    (1359, 1881196968, '3O'),
+    (1360, 889801231, 'Juan Becerril'),
+    (1361, 7649042632, 'E G'),
+    (1362, 1154963709, 'Fansdecarlitaroseblack (@Solosoyyoy1)'),
+    (1363, 7006513048, 'Linus'),
+    (1364, 1795495019, 'Edgardo Edcomchile (@Edcomchile_Ltda)'),
+    (1365, 1446521041, 'German'),
+    (1366, 6482467419, 'Enrique'),
+    (1367, 679678084, 'Jorge Poblete'),
+    (1368, 6471398857, 'Jose Luis Montemayor'),
+    (1369, 208431970, 'The Pastech (@Thepastech)'),
+    (1370, 810618571, 'Фольга (@all_LG12)'),
+    (1371, 7464902477, 'Mrjon Cortez (@Mrjoncortez)'),
+    (1372, 7545088667, 'Juan'),
+    (1373, 170125996, 'MaC (@mac_2w)'),
+    (1374, 179148633, 'Dmitry (@DPA989)'),
+    (1375, 7818852255, 'qcvna qacvna'),
+    (1376, 1801322998, 'Cristian Bcp'),
+    (1377, 5918262811, 'Sierra D (@sd42777)'),
+    (1378, 7594482587, 'Jack Rodríguez (@Jackiel_Dan)'),
+    (1379, 7933563654, 'JP Traz@'),
+    (1380, 5046029843, 'Rene Gutierrez CA6VGD'),
+    (1381, 7352880706, 'Claudio'),
+    (1382, 7765095107, '...'),
+    (1383, 7407499755, '549xx98'),
+    (1384, 1962885983, 'rodrigo'),
+    (1385, 1248665803, 'Ivan'),
+    (1386, 447889816, 'Fer (@Hecar)'),
+    (1387, 1478317275, 'Christopher (@Christopherrtfg)'),
+    (1388, 1095073154, 'Nico (@Nicanorignacio)'),
+    (1389, 1546746663, 'Hugo Poblete I CBQ'),
+    (1390, 1409778609, 'Carlangas (@Zarek_cl)'),
+    (1391, 967520765, 'Army Stark (@Armystark)'),
+    (1392, 1652108498, 'Hugh Martins (@Malevolostar)'),
+    (1393, 6302816207, 'Ivan'),
+    (1394, 6349650197, 'ID 6349650197'),
+    (1395, 1218569504, 'Giovanni'),
+    (1396, 5321976812, 'Oswaldito martix'),
+    (1397, 7863347139, 'Jusayen Veramendi'),
+    (1398, 7806335607, 'Telmo'),
+    (1399, 1051605797, 'Ed Porto (@EdneiPorto)'),
+    (1400, 7350271107, 'CD3WGH'),
+    (1401, 16364511, 'Manuel-CD4ACO (@killcon)'),
+    (1402, 1236581995, 'ArturoMz (@ArtMzRs)'),
+    (1403, 1598035504, 'Fernando'),
+    (1404, 47544181, 'Mujahid Tech (@Maamo0on)'),
+    (1405, 7743501720, 'Romeo Delta 131 Don Gato'),
+    (1406, 7609370440, 'Cruz Roja A.C. Sierra Suroeste PPL Fregenal De La Sierra'),
+    (1407, 1866085203, 'M C (@marcheloop)'),
+    (1408, 2036937940, 'Williams'),
+    (1409, 775551456, 'Elie (@designecl)'),
+    (1410, 5015842428, 'Steve (@sbobola44)'),
+    (1411, 2025509032, 'Martin Andres Sandoval Pinto'),
+    (1412, 481097860, '. (@Sy2ydjsu)'),
+    (1413, 1635598089, '.'),
+    (1414, 7848907140, 'Saul Salas'),
+    (1415, 1177001730, 'Moises Escobar (@Skettlita)'),
+    (1416, 7269527193, 'Rolando Alexis'),
+    (1417, 5843829966, '.'),
+    (1418, 7570496177, 'ID 7570496177'),
+    (1419, 6199324170, 'Francis Plympia'),
+    (1420, 658528631, 'AC'),
+    (1421, 7005186255, 'CD3RFM'),
+    (1422, 7506436387, 'Roy'),
+    (1423, 5879492396, 'Ric (@RichardSLP)'),
+    (1424, 7456062373, 'John Egg'),
+    (1425, 8077129837, '.'),
+    (1426, 7643779743, 'Frank'),
+    (1427, 326185981, 'Ignacio Alvarez (@iavalsasnini)'),
+    (1428, 1778642969, 'Pedro'),
+    (1429, 6504757315, 'Tio Motorola (@tiomotorola)'),
+    (1430, 835570730, 'salvoc0rp (@salvoc0rp)'),
+    (1431, 331527496, 'Victor Manuel'),
+    (1432, 780203384, 'Black House'),
+    (1433, 6538685086, 'Ignacio (@Ignaxio88)'),
+    (1434, 7523160492, 'Jairo Rojas'),
+    (1435, 7920965284, 'ID 7920965284'),
+    (1436, 7087980723, 'Jorge Toledo'),
+    (1437, 5735725895, 'Ing. René (@Elingevelasco)'),
+    (1438, 191900587, 'Javier Dominguez'),
+    (1439, 5154043680, 'ID 5154043680'),
+    (1440, 5023346862, 'Sal Eng.. (@Saaam2311)'),
+    (1441, 37669257, 'Tobias Eisemann (@xiberger)'),
+    (1442, 1805811374, 'User A (@abc_21312)'),
+    (1443, 1408283523, 'Moises Alvarez'),
+    (1444, 7765984557, 'Fj V'),
+    (1445, 824944374, 'Felipe Humeres'),
+    (1446, 551487647, 'Esteban Hernandez (@StarTakko)'),
+    (1447, 5937565247, 'Александр Завьялов (@Alikszv)'),
+    (1448, 623615953, 'Tony'),
+    (1449, 770349746, 'Roberto'),
+    (1450, 7441931151, 'Josfloisa6'),
+    (1451, 171960438, 'Martel Quiroz (@Martel_Quiroz)'),
+    (1452, 1759252837, 'Moshe Bukris'),
+    (1453, 6842562, 'Fernando EA1GFF (@EA1GFF)'),
+    (1454, 5808070221, 'ADMIN'),
+    (1455, 600342591, 'Leonid Rossman'),
+    (1456, 412548069, 'Fakku Fx 🇨🇱 CE7UDX (@Fakkufx)'),
+    (1457, 1636712365, 'Simón'),
+    (1458, 834800115, 'Rodrigo Garcia'),
+    (1459, 5938144501, 'Luis C Mora'),
+    (1460, 1331435190, '.'),
+    (1461, 5778545280, 'Gustavo'),
+    (1462, 5061079718, 'cr...'),
+    (1463, 636760035, 'M. V.'),
+    (1464, 1090733385, 'Nelson Rosas'),
+    (1465, 365682487, 'Erdling (@Verzogert2024)'),
+    (1466, 91689831, 'Luca IW4BPE (@IW4BPE)'),
+    (1467, 105491512, '@Fernando V.'),
+    (1468, 918020975, 'Kresimir St'),
+    (1469, 6722239948, 'Enrique(CA5BYP). Perez'),
+    (1470, 1212544949, 'Francisco Gatica'),
+    (1471, 1973882969, 'José Trinidad Naranjo Lopez (@cazador0672)'),
+    (1472, 5951918366, 'mamiro special'),
+    (1473, 1912691410, 'Adenir'),
+    (1474, 2037972194, 'Paco'),
+    (1475, 588272914, 'Jesus Sanchez'),
+    (1476, 6289221975, 'Javier'),
+    (1477, 1495151354, 'TELEINFORMATICA (@TELERADIO_AR)'),
+    (1478, 1004213710, 'EA5XS José Ant. Alcaraz Muñoz'),
+    (1479, 1593462031, 'Dioni'),
+    (1480, 889540377, 'YunierPP(ZCeLL) (@CL8RHG)'),
+    (1481, 821686504, 'Santi'),
+    (1482, 1805049084, 'DanMax'),
+    (1483, 1514753808, 'Javi'),
+    (1484, 1161185675, 'Nestor Marroni (@Lu8aj)'),
+    (1485, 871707279, 'Juan EA5BLD (@Juan_Ba)'),
+    (1486, 5597826070, 'Panshop6 (@Panshop6)'),
+    (1487, 969226696, 'Carlos'),
+    (1488, 5176393443, 'Benjamín Avendaño'),
+    (1489, 507559791, 'Gabriel Alarcon'),
+    (1490, 444520733, 'Sergey'),
+    (1491, 6301842758, 'ID 6301842758'),
+    (1492, 5096166816, 'El Indio De la pobla (@Lorea_lorea)'),
+    (1493, 6749040587, 'Full Jacket (@Full_Jacket)'),
+    (1494, 1966338341, 'Cristobal Pacheco'),
+    (1495, 579779669, 'Jayro Arriagada (@CE1UNU)'),
+    (1496, 6828608050, 'Eduardo'),
+    (1497, 6840813871, 'Carlos'),
+    (1498, 7255337375, 'E'),
+    (1499, 1265262880, 'Marcela'),
+    (1500, 6530838189, 'Setrack'),
+    (1501, 1334037596, 'Lazaro (@kYzrxFj)'),
+    (1502, 1415876, 'Claudio Gaete'),
+    (1503, 1456971514, 'Johans Canabes (@Jrca94)'),
+    (1504, 775360484, 'Hugo Muñoz'),
+    (1505, 6182818292, 'Persígala (@pompu208)'),
+    (1506, 1812484455, 'Rafael Flores'),
+    (1507, 1535704978, 'Jean Politro'),
+    (1508, 1912834396, 'Patricio Calderon'),
+    (1509, 5899812523, 'Luis Garcia'),
+    (1510, 1928934932, 'Juan (@JuanHM_CD2JDW)'),
+    (1511, 1703120792, 'Cristian'),
+    (1512, 6578859793, '025'),
+    (1513, 5194185694, 'Admid Sufan (@admid_sufan)'),
+    (1514, 1001009113, 'Flavio CD3...🚒🚒🚑🚑'),
+    (1515, 732014012, 'Nicolas (@fra12303)'),
+    (1516, 525232286, 'Richard CE3KGB'),
+    (1517, 6171156213, 'Jon'),
+    (1518, 1293267669, 'Cristian Araya Cabrera'),
+    (1519, 6916804917, 'Martín Ovalle'),
+    (1520, 6398966002, 'AAHM'),
+    (1521, 7110521795, 'Francisco Javi'),
+    (1522, 1413130966, 'CA4VEW Manuel'),
+    (1523, 1696015817, 'Pyth0n (@Pyth0n11)'),
+    (1524, 1574880911, 'COEP TRUJILLO'),
+    (1525, 5699359613, 'Edison Mora'),
+    (1526, 1679210934, 'Jaime Vergara'),
+    (1527, 6415823030, 'Alejandro Geeklabscr (@alepecho)'),
+    (1528, 5199314373, 'Javier Jaramillo'),
+    (1529, 272055466, 'Rashid Jorgge (@Rashid_Jorgge)'),
+    (1530, 7179006214, 'NETCELK & COMUNICELK Streaming & Communications (@NETCELKStreaming)'),
+    (1531, 1729977280, 'SEB10 👦🏽 (@sebasgs10)'),
+    (1532, 6687280980, 'Dr. Edwin Camahuali Chavez'),
+    (1533, 1678257310, 'ME LIBERE... ME LIBERE... ME LIBERE... Ja'),
+    (1534, 278983198, 'An Ad (@Adli561)'),
+    (1535, 1886689200, 'Telemint Westland'),
+    (1536, 6771036288, 'Adrian'),
+    (1537, 1571248091, 'Alex'),
+    (1538, 6654221475, 'Dave (@Somesillyname)'),
+    (1539, 1486479071, 'Владимир'),
+    (1540, 7107849238, 'KAS C.'),
+    (1541, 842262962, 'Collin Grove (@buckeye556)'),
+    (1542, 7027887752, 'David Bright'),
+    (1543, 82308037, 'Ralph A. Schmid (@dk5ras)'),
+    (1544, 1931461116, 'Andre (@Adzdee)'),
+    (1545, 1506598428, 'Gaby'),
+    (1546, 7046014095, 'JHACKO'),
+    (1547, 6096979897, 'Javier'),
+    (1548, 6944352624, 'Eduardo'),
+    (1549, 1940270168, 'andres garcia'),
+    (1550, 1513389095, 'Cristian (@QWERTYLAT)'),
+    (1551, 6248868446, 'THE CROW BLACK'),
+    (1552, 1984624303, 'Dell'),
+    (1553, 5504109329, 'Alejandro'),
+    (1554, 1438999604, 'Ricardo Beltrán'),
+    (1555, 1544895650, 'Carlos G.'),
+    (1556, 133678574, 'Elkintoelemento (@Elsextoelemento)'),
+    (1557, 16754588, 'James Bon'),
+    (1558, 223417259, 'L H'),
+    (1559, 1919460, 'Angel - CI_EA1 (@Angel_CI_EA1)'),
+    (1560, 15798472, 'J. Ramon Crespo'),
+    (1561, 6799483968, 'Eduardo (@emesias)'),
+    (1562, 12317107, 'JOSÉ CARLOS (@EB7HEM)'),
+    (1563, 1421819051, 'Víctor EA7KIG'),
+    (1564, 1101963671, 'Luis E (@LEGE_18)'),
+    (1565, 598830132, 'F (@f_2021f)'),
+    (1566, 656978486, 'Irwan Trans'),
+    (1567, 1375365030, 'Fireman 334 (@Qwertyy909)'),
+    (1568, 6588408266, 'Cristian Valdivia'),
+    (1569, 6589853109, 'patricio'),
+    (1570, 6429919246, 'Rafita'),
+    (1571, 5763181472, 'Eco Alfa'),
+    (1572, 2123555916, 'Oscar Andrades'),
+    (1573, 5814908156, 'Yo'),
+    (1574, 1114716231, 'Jorge'),
+    (1575, 1521256555, 'Arley Arley'),
+    (1576, 5306720103, 'Gabriel Muñoz'),
+    (1577, 1915712687, 'B'),
+    (1578, 5387117103, 'William Cazares G.'),
+    (1579, 5662330727, 'Beto'),
+    (1580, 892356396, 'Ronald (@ElimperioMIP)'),
+    (1581, 330310053, 'Leo (@Leotropa)'),
+    (1582, 1077140113, 'Mario Cabrera [Marshall] (@emci987)'),
+    (1583, 282028418, 'DIGITAL INVADERS (@digital_invaders)'),
+    (1584, 8350273, 'José Luís'),
+    (1585, 5605939387, 'Nelson Andrés Garcia Garcia (@NelsonGarcia29)'),
+    (1586, 1484858753, 'Alexander Mardones'),
+    (1587, 1840517737, 'Bubi'),
+    (1588, 456312386, 'Richard Alfonso'),
+    (1589, 1449325311, 'Mario Fernandez (@pwars)'),
+    (1590, 5616102686, 'Ricardo Yañez'),
+    (1591, 1520507359, 'Holger'),
+    (1592, 1517464634, 'Deadking'),
+    (1593, 1320715068, 'cristian sepulveda'),
+    (1594, 934378829, 'Roberto (@txcomunicaciones)'),
+    (1595, 653040633, 'ID 653040633'),
+)
+CLEANUP_BLOCK_TARGET_IDS = frozenset(uid for _idx, uid, _name in CLEANUP_BLOCK_TARGETS)
 
 _mtproto_api_id_raw = (
     os.getenv("TELEGRAM_API_ID")
@@ -8425,7 +9249,7 @@ def main_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "🧹 Limpieza 20/11/2022–01/01/2024",
+                    "🧹 Limpieza bloque 786–1595",
                     callback_data="admin:cleanup_inactive",
                 )
             ],
@@ -8906,6 +9730,7 @@ async def command_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def inactive_cleanup_date_in_range(last_seen: object) -> bool:
+    """Compatibilidad: ya no define el bloque 786–1595 de la versión 2.8.58."""
     if not isinstance(last_seen, datetime):
         return False
     local_dt = (
@@ -8917,21 +9742,64 @@ def inactive_cleanup_date_in_range(last_seen: object) -> bool:
     return INACTIVE_CLEANUP_START_DATE <= observed_date <= INACTIVE_CLEANUP_END_DATE
 
 
-def inactive_cleanup_historical_candidates() -> list[dict[str, object]]:
-    candidates = [
-        entry
-        for entry in build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
-        if inactive_cleanup_date_in_range(entry.get("last_seen"))
-    ]
-    candidates.sort(
-        key=lambda item: (
-            item.get("last_seen")
-            if isinstance(item.get("last_seen"), datetime)
-            else datetime.max.replace(tzinfo=BOT_TZ)
+def validate_cleanup_block_targets() -> None:
+    indexes = [idx for idx, _uid, _name in CLEANUP_BLOCK_TARGETS]
+    user_ids = [uid for _idx, uid, _name in CLEANUP_BLOCK_TARGETS]
+
+    if len(CLEANUP_BLOCK_TARGETS) != CLEANUP_BLOCK_EXPECTED_COUNT:
+        raise RuntimeError(
+            f"Bloque de limpieza inválido: esperaba {CLEANUP_BLOCK_EXPECTED_COUNT} "
+            f"usuarios y hay {len(CLEANUP_BLOCK_TARGETS)}."
         )
-    )
+    if len(set(indexes)) != CLEANUP_BLOCK_EXPECTED_COUNT:
+        raise RuntimeError("Bloque de limpieza inválido: hay números de fila repetidos.")
+    if len(set(user_ids)) != CLEANUP_BLOCK_EXPECTED_COUNT:
+        raise RuntimeError("Bloque de limpieza inválido: hay User ID repetidos.")
+    if min(indexes) != CLEANUP_BLOCK_FIRST_INDEX or max(indexes) != CLEANUP_BLOCK_LAST_INDEX:
+        raise RuntimeError("Bloque de limpieza inválido: rango de filas inesperado.")
+
+    digest = hashlib.sha256(
+        ",".join(str(uid) for uid in user_ids).encode("utf-8")
+    ).hexdigest()
+    if digest != CLEANUP_BLOCK_TARGET_SHA256:
+        raise RuntimeError("Bloque de limpieza inválido: la huella SHA-256 de User ID cambió.")
+
+
+def cleanup_block_candidates() -> list[dict[str, object]]:
+    """Construye exactamente los 810 candidatos por User ID.
+
+    La actividad histórica se adjunta solo como información. Un candidato sin
+    last_seen sigue siendo candidato porque la selección de esta versión es el
+    bloque explícito 786–1595, no un filtro por fecha.
+    """
+    validate_cleanup_block_targets()
+
+    activity_by_id = {
+        int(entry.get("user_id") or 0): entry
+        for entry in build_member_activity_snapshot(HISTORY_SOURCE_CHAT_ID)
+        if int(entry.get("user_id") or 0) > 0
+    }
+
+    candidates: list[dict[str, object]] = []
+    for source_index, user_id, source_name in CLEANUP_BLOCK_TARGETS:
+        item = dict(activity_by_id.get(user_id) or {})
+        item["user_id"] = int(user_id)
+        item.setdefault("username", "")
+        item.setdefault("display_name", source_name)
+        item.setdefault("first_seen", None)
+        item.setdefault("last_seen", None)
+        item.setdefault("message_count", 0)
+        item.setdefault("messages_30d", 0)
+        item["cleanup_source_index"] = int(source_index)
+        item["cleanup_source_name"] = source_name
+        candidates.append(item)
+
     return candidates
 
+
+def inactive_cleanup_historical_candidates() -> list[dict[str, object]]:
+    """Alias conservado para compatibilidad interna."""
+    return cleanup_block_candidates()
 
 def mtproto_cleanup_configuration_error() -> str:
     if not TELETHON_AVAILABLE:
@@ -9084,9 +9952,7 @@ async def scan_current_group_members_mtproto(
 
 
 async def build_inactive_cleanup_plan() -> dict[str, object]:
-    """Construye el plan SIN expulsar a nadie."""
-    candidates = inactive_cleanup_historical_candidates()
-
+    """Construye el plan del bloque 786–1595 SIN expulsar a nadie."""
     try:
         client, group_entity, current_members, _snapshot = (
             await scan_current_group_members_mtproto(HISTORY_SOURCE_CHAT_ID)
@@ -9096,6 +9962,11 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
             "No pude obtener el padrón actual del supergrupo por MTProto. "
             f"Detalle: {exc}"
         ) from exc
+
+    # Se construye DESPUÉS del escaneo MTProto. Así, si algún usuario
+    # anteriormente retirado volvió a ingresar, restore_rejoined_users() ya
+    # habrá reactivado su perfil antes de consultar su actividad histórica.
+    candidates = cleanup_block_candidates()
 
     me = await client.get_me()
     my_permissions = await client.get_permissions(group_entity, me)
@@ -9155,6 +10026,10 @@ async def build_inactive_cleanup_plan() -> dict[str, object]:
         "admins": admins,
         "bots": bots,
         "protected": protected,
+        "target_first_index": CLEANUP_BLOCK_FIRST_INDEX,
+        "target_last_index": CLEANUP_BLOCK_LAST_INDEX,
+        "target_expected_count": CLEANUP_BLOCK_EXPECTED_COUNT,
+        "target_sha256": CLEANUP_BLOCK_TARGET_SHA256,
     }
 
 
@@ -9167,33 +10042,38 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
     bots = list(plan.get("bots") or [])
     protected = list(plan.get("protected") or [])
 
+    current_count = int(plan.get("scanned_members") or 0)
+    projected_count = max(0, current_count - len(eligible))
+
     lines = [
-        "PECOS PAUL KELE - SIMULACIÓN DE LIMPIEZA POR INACTIVIDAD",
+        "PECOS PAUL KELE - SIMULACIÓN BLOQUE 786–1595",
         f"Grupo: {group_title}",
         f"Generado: {datetime.now(BOT_TZ).strftime('%d/%m/%Y %H:%M')} ({TIMEZONE_NAME})",
         "",
-        "RANGO INCLUSIVO:",
-        f"{INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
-        f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
+        "OBJETIVO FIJO POR USER ID:",
+        f"Filas fuente: {CLEANUP_BLOCK_FIRST_INDEX} -> {CLEANUP_BLOCK_LAST_INDEX}",
+        f"User ID configurados: {len(candidates)}",
+        f"SHA-256 lista ordenada: {CLEANUP_BLOCK_TARGET_SHA256}",
         "",
-        f"Candidatos históricos por fecha: {len(candidates)}",
-        f"Miembros visibles en escaneo MTProto: {int(plan.get('scanned_members') or 0)}",
-        f"Elegibles para expulsión: {len(eligible)}",
+        f"Miembros actuales en escaneo MTProto: {current_count}",
+        f"Elegibles reales para expulsión: {len(eligible)}",
         f"Ya fuera del padrón actual: {len(not_visible)}",
         f"Administradores/creador protegidos: {len(admins)}",
         f"Bots excluidos: {len(bots)}",
         f"IDs protegidos de Pecos/propietarios: {len(protected)}",
+        f"Miembros proyectados después de expulsiones exitosas: {projected_count}",
         "",
         "IMPORTANTE:",
         "- ESTA SIMULACIÓN NO EXPULSA A NADIE.",
+        "- La selección se hace EXCLUSIVAMENTE por Telegram User ID.",
+        "- El nombre, apodo y @username NO se usan para decidir la expulsión.",
+        "- Antes de cada expulsión Pecos revalida privilegios del User ID.",
+        "- Administradores, creador, bots e IDs protegidos se omiten.",
         "- La expulsión usa MTProto/Telethon kick_participant (ban + unban).",
         "- Pecos NO llama a deleteParticipantHistory ni a métodos de borrado.",
-        "- Los mensajes históricos del usuario se conservan.",
-        "- El usuario expulsado puede volver a ingresar con un enlace válido.",
-        "- Los candidatos que ya no están en el padrón actual no reducen el contador del grupo.",
-        "- Al confirmar, los ya fuera del grupo se depuran del padrón estadístico de Pecos.",
-        "- Los expulsados correctamente también se depuran del padrón estadístico de Pecos.",
-        "- La depuración se hace por User ID, nunca por nombre ni @username.",
+        "- Los mensajes históricos, archivos, fingerprints y memoria técnica se conservan.",
+        "- Los expulsados correctamente se retiran del padrón estadístico de Pecos.",
+        "- Si un User ID del bloque ya salió, solo se depura del padrón estadístico.",
         "",
         "ELEGIBLES PARA EXPULSAR:",
     ]
@@ -9204,33 +10084,33 @@ def build_inactive_cleanup_plan_report(plan: dict[str, object]) -> str:
         for index, item in enumerate(eligible, start=1):
             entry, user = item
             lines.append(
-                f"{index}. {mtproto_user_display(user)} | "
+                f"{index}. fila #{int(entry.get('cleanup_source_index') or 0)} | "
+                f"{mtproto_user_display(user)} | "
                 f"User ID: {int(entry.get('user_id') or 0)} | "
                 f"Última actividad: {format_activity_timestamp(entry.get('last_seen'))} | "
-                f"Mensajes históricos registrados: {int(entry.get('message_count') or 0)}"
+                f"Mensajes históricos: {int(entry.get('message_count') or 0)}"
             )
 
-    lines += ["", "YA FUERA DEL GRUPO — SE DEPURARÁN DEL PADRÓN DE PECOS:"]
+    lines += ["", "YA FUERA DEL GRUPO — SOLO DEPURACIÓN DEL PADRÓN PECOS:"]
     if not not_visible:
         lines.append("(ninguno)")
     else:
         for index, entry in enumerate(not_visible, start=1):
             lines.append(
-                f"{index}. {activity_person_label(entry)} | "
+                f"{index}. fila #{int(entry.get('cleanup_source_index') or 0)} | "
+                f"{activity_person_label(entry)} | "
                 f"User ID: {int(entry.get('user_id') or 0)} | "
-                f"Última actividad: {format_activity_timestamp(entry.get('last_seen'))} | "
-                f"Mensajes históricos registrados: {int(entry.get('message_count') or 0)}"
+                f"Última actividad: {format_activity_timestamp(entry.get('last_seen'))}"
             )
 
     return "\n".join(lines)
-
 
 def inactive_cleanup_confirmation_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "⚠️ EXPULSAR + DEPURAR PADRÓN",
+                    "⚠️ EXPULSAR BLOQUE 786–1595",
                     callback_data="cleanup:confirm",
                 )
             ],
@@ -9258,7 +10138,7 @@ async def send_inactive_cleanup_simulation(
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "🧹 Limpieza por inactividad no disponible.\n\n"
+                "🧹 Limpieza del bloque 786–1595 no disponible.\n\n"
                 f"{error}\n\n"
                 "El resto de Pecos continúa funcionando normalmente."
             ),
@@ -9276,7 +10156,7 @@ async def send_inactive_cleanup_simulation(
     try:
         plan = await build_inactive_cleanup_plan()
     except Exception as exc:
-        log.exception("No se pudo simular limpieza por inactividad")
+        log.exception("No se pudo simular limpieza del bloque 786–1595")
         with contextlib.suppress(TelegramError):
             await status.edit_text(f"❌ No pude construir la simulación:\n{exc}")
         return
@@ -9288,7 +10168,7 @@ async def send_inactive_cleanup_simulation(
     report = build_inactive_cleanup_plan_report(plan)
     payload = io.BytesIO(report.encode("utf-8-sig"))
     payload.name = (
-        "pecos_simulacion_limpieza_"
+        "pecos_simulacion_bloque_786_1595_"
         + datetime.now(BOT_TZ).strftime("%Y-%m-%d_%H%M")
         + ".txt"
     )
@@ -9306,14 +10186,15 @@ async def send_inactive_cleanup_simulation(
         chat_id=chat_id,
         document=payload,
         caption=(
-            "🧹 SIMULACIÓN — limpieza por inactividad\n\n"
-            f"Rango: {INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} → "
-            f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}\n"
-            f"Candidatos históricos: {candidate_count}\n"
+            "🧹 SIMULACIÓN — bloque 786–1595\n\n"
+            f"User ID objetivo configurados: {candidate_count}\n"
             f"Elegibles actuales para expulsión: {eligible_count}\n"
-            f"Ya fuera del grupo para depurar del padrón: {already_out_count}\n\n"
+            f"Ya fuera del grupo para depurar del padrón: {already_out_count}\n"
+            f"Miembros actuales escaneados: {int(plan.get('scanned_members') or 0)}\n"
+            f"Proyección tras expulsiones: "
+            f"{max(0, int(plan.get('scanned_members') or 0) - eligible_count)}\n\n"
             "✅ Mensajes históricos: SE CONSERVAN\n"
-            "🆔 Todo se identifica por User ID.\n"
+            "🆔 Selección y expulsión exclusivamente por User ID.\n"
             "⚠️ La confirmación vence en 10 minutos."
         ),
         reply_markup=inactive_cleanup_confirmation_menu(),
@@ -9337,7 +10218,7 @@ async def execute_inactive_cleanup(
         try:
             plan = await build_inactive_cleanup_plan()
         except Exception as exc:
-            log.exception("No se pudo revalidar limpieza por inactividad")
+            log.exception("No se pudo revalidar limpieza del bloque 786–1595")
             with contextlib.suppress(TelegramError):
                 await progress.edit_text(f"❌ No pude revalidar la limpieza:\n{exc}")
             return
@@ -9361,7 +10242,7 @@ async def execute_inactive_cleanup(
                 if permissions and permissions.is_admin:
                     skipped_admin.append((entry, user))
                     db.add_history(
-                        f"LIMPIEZA INACTIVOS: omitido admin user_id={user_id}"
+                        f"LIMPIEZA BLOQUE 786-1595: omitido admin user_id={user_id}"
                     )
                     continue
 
@@ -9376,7 +10257,7 @@ async def execute_inactive_cleanup(
                 expelled.append((entry, user))
 
                 db.add_history(
-                    "LIMPIEZA INACTIVOS: EXPULSADO "
+                    "LIMPIEZA BLOQUE 786-1595: EXPULSADO "
                     f"user_id={user_id} "
                     f"last_seen={format_activity_timestamp(entry.get('last_seen'))} "
                     "historial_mensajes=CONSERVAR"
@@ -9412,7 +10293,7 @@ async def execute_inactive_cleanup(
                         await client.kick_participant(group_entity, user)
                         expelled.append((entry, user))
                         db.add_history(
-                            "LIMPIEZA INACTIVOS: EXPULSADO tras FloodWait "
+                            "LIMPIEZA BLOQUE 786-1595: EXPULSADO tras FloodWait "
                             f"user_id={user_id} historial_mensajes=CONSERVAR"
                         )
                     except Exception as retry_exc:
@@ -9426,7 +10307,7 @@ async def execute_inactive_cleanup(
             except Exception as exc:
                 failed.append((entry, user, str(exc)))
                 db.add_history(
-                    f"LIMPIEZA INACTIVOS: ERROR user_id={user_id} error={exc}"
+                    f"LIMPIEZA BLOQUE 786-1595: ERROR user_id={user_id} error={exc}"
                 )
 
         # -----------------------------------------------------------------
@@ -9450,12 +10331,12 @@ async def execute_inactive_cleanup(
         purged_profiles = db.retire_user_profiles(
             HISTORY_SOURCE_CHAT_ID,
             purge_ids,
-            reason="limpieza_inactivos",
+            reason="limpieza_bloque_786_1595",
         )
 
         if purged_profiles:
             db.add_history(
-                "LIMPIEZA INACTIVOS: PADRON DEPURADO "
+                "LIMPIEZA BLOQUE 786-1595: PADRON DEPURADO "
                 f"usuarios={purged_profiles} "
                 f"ya_fuera={len(already_out_ids)} "
                 f"expulsados={len(expelled_ids)} "
@@ -9465,18 +10346,15 @@ async def execute_inactive_cleanup(
         # -----------------------------------------------------------------
         # Registro privado detallado para el administrador
         # -----------------------------------------------------------------
-        period_label = (
-            f"{INACTIVE_CLEANUP_START_DATE.year}"
-            f"–{INACTIVE_CLEANUP_END_DATE.year}"
-        )
+        block_label = f"{CLEANUP_BLOCK_FIRST_INDEX}–{CLEANUP_BLOCK_LAST_INDEX}"
 
         lines = [
-            "PECOS PAUL KELE - USUARIOS EXPULSADOS POR INACTIVIDAD",
+            "PECOS PAUL KELE - RESULTADO LIMPIEZA BLOQUE 786–1595",
             f"Grupo: {plan.get('group_title')}",
             f"Fecha: {datetime.now(BOT_TZ).strftime('%d/%m/%Y %H:%M')}",
-            f"Período evaluado: "
-            f"{INACTIVE_CLEANUP_START_DATE.strftime('%d/%m/%Y')} -> "
-            f"{INACTIVE_CLEANUP_END_DATE.strftime('%d/%m/%Y')}",
+            f"Bloque objetivo: filas {CLEANUP_BLOCK_FIRST_INDEX} -> {CLEANUP_BLOCK_LAST_INDEX}",
+            f"User ID configurados: {CLEANUP_BLOCK_EXPECTED_COUNT}",
+            f"SHA-256 lista ordenada: {CLEANUP_BLOCK_TARGET_SHA256}",
             "",
             f"Total expulsados: {len(expelled)}",
             f"Ya estaban fuera y fueron depurados del padrón: {len(already_out_ids)}",
@@ -9494,7 +10372,7 @@ async def execute_inactive_cleanup(
             for index, (entry, user) in enumerate(expelled, start=1):
                 lines.extend(
                     [
-                        f"{index}. {mtproto_user_display(user)}",
+                        f"{index}. fila #{int(entry.get('cleanup_source_index') or 0)} | {mtproto_user_display(user)}",
                         f"   User ID: {int(entry.get('user_id') or 0)}",
                         f"   Última actividad observada: "
                         f"{format_activity_timestamp(entry.get('last_seen'))}",
@@ -9512,7 +10390,7 @@ async def execute_inactive_cleanup(
             for index, entry in enumerate(already_out, start=1):
                 lines.extend(
                     [
-                        f"{index}. {activity_person_label(entry)}",
+                        f"{index}. fila #{int(entry.get('cleanup_source_index') or 0)} | {activity_person_label(entry)}",
                         f"   User ID: {int(entry.get('user_id') or 0)}",
                         f"   Última actividad observada: "
                         f"{format_activity_timestamp(entry.get('last_seen'))}",
@@ -9583,7 +10461,7 @@ async def execute_inactive_cleanup(
             public_text = (
                 "🧹 <b>Pecos hizo limpieza de la casa.</b>\n"
                 f"Se expulsaron <b>{expelled_count} {noun}</b> "
-                f"correspondientes al período <b>{period_label}</b>.\n"
+                f"del bloque administrativo <b>{block_label}</b>.\n"
                 "Los mensajes históricos permanecen en el grupo."
             )
 
@@ -9594,8 +10472,8 @@ async def execute_inactive_cleanup(
                     parse_mode="HTML",
                 )
                 db.add_history(
-                    "LIMPIEZA INACTIVOS: AVISO PUBLICO "
-                    f"expulsados={expelled_count} periodo={period_label}"
+                    "LIMPIEZA BLOQUE 786-1595: AVISO PUBLICO "
+                    f"expulsados={expelled_count} bloque={block_label}"
                 )
             except TelegramError as exc:
                 log.warning(
@@ -9603,7 +10481,7 @@ async def execute_inactive_cleanup(
                     exc,
                 )
                 db.add_history(
-                    "LIMPIEZA INACTIVOS: ERROR AVISO PUBLICO "
+                    "LIMPIEZA BLOQUE 786-1595: ERROR AVISO PUBLICO "
                     f"expulsados={expelled_count} error={exc}"
                 )
 
@@ -10766,7 +11644,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "/actividad — Resumen de actividad observada\n"
             "/actividad @usuario — Ficha de un usuario\n"
             "/inactivos 90 — Usuarios sin actividad durante 90 días\n"
-            "/limpieza_inactivos — Simular/confirmar expulsión histórica\n"
+            "/limpieza_inactivos — Simular/confirmar bloque 786–1595\n"
             "/recordar texto — Guardar un recuerdo del grupo\n"
             "/recuerdos — Ver recuerdos\n"
             "/olvidar ID — Borrar un recuerdo\n"
@@ -15896,7 +16774,7 @@ async def post_init(application: Application) -> None:
             BotCommand("start", "Abrir el menú de Pecos"),
             BotCommand("id", "Ver mi Telegram User ID"),
             BotCommand("config", "Abrir configuración privada"),
-            BotCommand("limpieza_inactivos", "Simular limpieza histórica"),
+            BotCommand("limpieza_inactivos", "Simular bloque 786–1595"),
             BotCommand("cancel", "Cancelar una operación"),
         ]
 
